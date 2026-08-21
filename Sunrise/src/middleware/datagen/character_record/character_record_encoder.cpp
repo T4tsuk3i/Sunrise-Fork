@@ -40,9 +40,11 @@ constexpr std::size_t kPreviewFlagOffsets[]{8, 9};
         static_cast<std::int8_t>(character.gender),
         static_cast<std::int8_t>(character.characterClass),
     };
-    std::memcpy(identity.headerBlock.data(),
-                layout::kHeaderBlockBytes.data(),
-                layout::kHeaderBlockBytes.size());
+    // A character with no captured header -- an authored template, or a save written before
+    // creation started keeping one -- falls back to the single block they all used to share.
+    const auto& headerBlock =
+        character.appearanceHeaderValid ? character.appearanceHeader : layout::kHeaderBlockBytes;
+    std::memcpy(identity.headerBlock.data(), headerBlock.data(), headerBlock.size());
 
     output = {};
     appearance::apply_sentinels(output);

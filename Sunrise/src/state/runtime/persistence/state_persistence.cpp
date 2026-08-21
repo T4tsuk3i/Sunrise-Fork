@@ -142,6 +142,21 @@ void emit_key(Document& doc, const char* key, int depth) noexcept {
 // Emission of nested account types.
 // ---------------------------------------------------------------------------
 
+/** Emits the captured appearance header, or null for a character that never carried one. */
+void emit_appearance_header(Document& doc, const state::CharacterState& c) noexcept {
+    if (!c.appearanceHeaderValid) {
+        const char* n = "null";
+        doc.buf.insert(doc.buf.end(), n, n + 4);
+        return;
+    }
+    open_array(doc);
+    for (std::size_t i = 0; i < c.appearanceHeader.size(); ++i) {
+        if (i > 0) comma(doc);
+        emit_uint(doc, c.appearanceHeader[i]);
+    }
+    close_array(doc);
+}
+
 void emit_sockets(Document& doc,
                   const account::inventory::Sockets& sockets,
                   int /*depth*/) noexcept {
@@ -299,6 +314,10 @@ void emit_character(Document& doc, const state::CharacterState& c, int depth) no
     newline(doc);
     emit_key(doc, "content_bypass", depth + 1);
     emit_bool(doc, c.contentBypass);
+    comma(doc);
+    newline(doc);
+    emit_key(doc, "appearance_header", depth + 1);
+    emit_appearance_header(doc, c);
     comma(doc);
     newline(doc);
     // The ability entries are no longer character fields: they live on the subclass item and so
@@ -833,6 +852,29 @@ private:
         }
     }
 
+    /** Parses the captured appearance header; null leaves the character on the shared block. */
+    [[nodiscard]] bool parse_appearance_header(state::CharacterState& output) noexcept {
+        output.appearanceHeader = {};
+        output.appearanceHeaderValid = false;
+        if (parse_null()) return true;
+        if (!consume('[')) return false;
+        std::size_t count = 0;
+        for (;;) {
+            if (count >= output.appearanceHeader.size()) return false;
+            std::uint64_t v = 0;
+            if (!parse_uint(v)) return false;
+            output.appearanceHeader[count] = static_cast<std::uint8_t>(v);
+            ++count;
+            if (consume(']')) break;
+            if (!consume(',')) return false;
+        }
+        // A short block cannot be padded into a valid header, so it is refused outright rather
+        // than published half-formed.
+        if (count != output.appearanceHeader.size()) return false;
+        output.appearanceHeaderValid = true;
+        return true;
+    }
+
     [[nodiscard]] bool parse_character(state::CharacterState& output) noexcept {
         output = {};
         if (!consume('{')) return false;
@@ -870,6 +912,8 @@ private:
                 output.lastOrbitedDestination = static_cast<std::uint32_t>(v);
             } else if (key == "content_bypass") {
                 if (!parse_bool(output.contentBypass)) return false;
+            } else if (key == "appearance_header") {
+                if (!parse_appearance_header(output)) return false;
                 // The ability-entry keys a file written before those fields moved onto the subclass
                 // item still carries fall through to skip_value() below, so an older save still
                 // loads.

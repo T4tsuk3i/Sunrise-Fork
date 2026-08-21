@@ -165,6 +165,13 @@ bool encode(const state::CharacterState& state,
     object.identity.race = static_cast<std::int8_t>(state.race);
     object.identity.gender = static_cast<std::int8_t>(state.gender);
     object.identity.characterClass = static_cast<std::int8_t>(state.characterClass);
+    // The in-world character model reads its appearance from here, so the block the roster
+    // record publishes has to arrive on the character object too or the two disagree.
+    if (state.appearanceHeaderValid) {
+        std::memcpy(object.creationHeader.data(),
+                    state.appearanceHeader.data(),
+                    state.appearanceHeader.size());
+    }
     object.lastOrbitedDestination = state.lastOrbitedDestination;
     object.previewMirrors.fill(state.previewAvailable ? kNativeTrue : kNativeFalse);
     object.contentBypass = state.contentBypass ? kNativeTrue : kNativeFalse;

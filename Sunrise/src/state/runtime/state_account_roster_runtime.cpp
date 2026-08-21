@@ -126,6 +126,7 @@ bool create_character(AccountState& account,
                       std::uint8_t characterClass,
                       std::uint8_t gender,
                       std::uint8_t race,
+                      const AppearanceHeader& appearanceHeader,
                       std::uint64_t& characterSoid) noexcept {
     characterSoid = 0;
     {
@@ -208,6 +209,10 @@ bool create_character(AccountState& account,
     character.appearanceValue = 0.0f;
     character.lastOrbitedDestination = 0;
     character.contentBypass = false;
+    // Captured from the creation request, so the character keeps the face the player built
+    // instead of the single authored block every character used to share.
+    character.appearanceHeader = appearanceHeader;
+    character.appearanceHeaderValid = true;
     character.equipment = {};
     character.inventory = {};
     character.nextInventorySerial = 0;

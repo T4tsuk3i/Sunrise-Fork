@@ -325,12 +325,17 @@ bool process(const ServiceRoute& route,
                              "ev=ws501 stage=parse result=ok");
             {
                 char rbuf[128]{};
-                int rn = std::snprintf(rbuf,
-                                       sizeof rbuf,
-                                       "ev=ws501 stage=fields class=%u gender=%u race=%u",
-                                       static_cast<unsigned>(creationRequest.characterClass),
-                                       static_cast<unsigned>(creationRequest.gender),
-                                       static_cast<unsigned>(creationRequest.race));
+                int rn = std::snprintf(
+                    rbuf,
+                    sizeof rbuf,
+                    "ev=ws501 stage=fields class=%u gender=%u race=%u header_hex=%02X%02X%02X%02X",
+                    static_cast<unsigned>(creationRequest.characterClass),
+                    static_cast<unsigned>(creationRequest.gender),
+                    static_cast<unsigned>(creationRequest.race),
+                    static_cast<unsigned>(creationRequest.appearanceHeader[0]),
+                    static_cast<unsigned>(creationRequest.appearanceHeader[1]),
+                    static_cast<unsigned>(creationRequest.appearanceHeader[6]),
+                    static_cast<unsigned>(creationRequest.appearanceHeader[7]));
                 if (rn > 0) {
                     core::log::write(core::log::Channel::server,
                                      core::log::Level::info,
@@ -362,6 +367,7 @@ bool process(const ServiceRoute& route,
                                          creationRequest.characterClass,
                                          creationRequest.gender,
                                          creationRequest.race,
+                                         creationRequest.appearanceHeader,
                                          characterSoid)) {
                 core::log::write(core::log::Channel::server,
                                  core::log::Level::warn,

@@ -14,6 +14,12 @@ inline constexpr std::size_t kCharacterCapacity = 3;
 /** A server-authored dismantle policy: a few rows per rarity and gear class. */
 inline constexpr std::size_t kDismantleRewardPolicyCapacity = 32;
 
+/** The client-authored appearance header both character encoders publish verbatim. */
+inline constexpr std::size_t kAppearanceHeaderSize = 36;
+
+/** The appearance header as it is carried between the request codec, state and the encoders. */
+using AppearanceHeader = std::array<std::uint8_t, kAppearanceHeaderSize>;
+
 /** Gear classes a dismantle payout row can be limited to. */
 enum class DismantleGearClass : std::uint8_t {
     weapon = 1U << 0U,
@@ -144,6 +150,14 @@ struct CharacterState {
     std::uint32_t lastOrbitedDestination{};
     /** Server policy that arms content checks only with the matching family-5 flag. */
     bool contentBypass{};
+    /**
+     * Appearance header captured from the create-character request, in record byte order.
+     * Its values index per-race customization tables, so it is only meaningful beside the race
+     * it arrived with.
+     */
+    AppearanceHeader appearanceHeader{};
+    /** False for a character authored in settings.json or saved before the header was captured. */
+    bool appearanceHeaderValid{};
     /**
      * Runtime-only socket entries the player has selected at least once. Selected entries still
      * publish active; this mask keeps a later inactive entry acquired instead of new. Unverified:

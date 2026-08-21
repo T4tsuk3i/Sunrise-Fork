@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 
 #include "../account/account_state.h"
@@ -12,6 +13,7 @@ namespace sunrise::state {
  * @param characterClass Character class (0=titan, 1=hunter, 2=warlock).
  * @param gender Character gender (0=male, 1=female).
  * @param race Character race (0=human, 1=awoken, 2=exo).
+ * @param appearanceHeader Authored appearance block from the request, in record byte order.
  * @param characterSoid Receives the SOID of the newly created character.
  * @return True when the character was created and the account validates.
  */
@@ -19,6 +21,7 @@ namespace sunrise::state {
                                     std::uint8_t characterClass,
                                     std::uint8_t gender,
                                     std::uint8_t race,
+                                    const AppearanceHeader& appearanceHeader,
                                     std::uint64_t& characterSoid) noexcept;
 
 /**
