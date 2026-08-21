@@ -45,6 +45,16 @@ struct Settings {
 /** Closes active sinks and clears the bounded in-memory log view. */
 void shutdown() noexcept;
 
+/**
+ * Clears retained in-memory history and, when the file sink is active, rotates the log file
+ * (the current file becomes the one ".old" backup and a fresh empty file replaces it) so the
+ * next events start from a clean slate without restarting the process.
+ * @return True when cleared successfully. False when logging was not initialized, or the file
+ *         sink failed to reopen — in the latter case the file sink is dropped for the rest of
+ *         the process but the debugger sink and in-memory history keep working.
+ */
+[[nodiscard]] bool clear() noexcept;
+
 /** @return True while the channel threshold admits this severity. */
 [[nodiscard]] bool accepts(Channel channel, Level level) noexcept;
 

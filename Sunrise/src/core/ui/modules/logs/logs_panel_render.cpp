@@ -2,6 +2,7 @@
 #include <imgui.h>
 #include <string_view>
 
+#include "../../../logging/log.h"
 #include "../../../logging/snapshot/snapshot.h"
 #include "../../components/toggle/ui_toggle_component.h"
 #include "../../scaling/dpi/ui_dpi_scaling.h"
@@ -27,6 +28,12 @@ constexpr char kCopyPendingLabel[] = "Copy queued.";
 constexpr char kCopyCompleteLabel[] = "Copied visible lines.";
 /** Shown until the next request or a reset. */
 constexpr char kCopyFailedLabel[] = "Clipboard copy failed.";
+/** Fixed action label, also used to measure the row width. */
+constexpr char kClearLabel[] = "Clear";
+/** Shown briefly after a successful clear. */
+constexpr char kClearCompleteLabel[] = "History and log file cleared.";
+/** Shown briefly after a failed clear. */
+constexpr char kClearFailedLabel[] = "Clear failed; file sink dropped.";
 /** Zero size lets the log child take all the remaining space. */
 constexpr ImVec2 kAutomaticChildSize{0.0F, 0.0F};
 /** 1 scrolls to the bottom edge of the last line. */
@@ -41,6 +48,11 @@ constexpr ImGuiChildFlags kLogChildFlags = ImGuiChildFlags_Borders;
 bool g_autoScroll{true};
 /** Recorded count from the last drawn frame. A change in it means the log grew. */
 std::uint64_t g_recordedCount{};
+
+/** State of the last explicit clear action. */
+enum class ClearStatus : unsigned char { idle, cleared, failed };
+/** Shown until the next request or a reset. */
+ClearStatus g_clearStatus{ClearStatus::idle};
 
 /**
  * Counts every stored event, including ones the ring replaced. The stored count alone stops
@@ -66,6 +78,31 @@ void draw_copy_button(const log::view::Result& visible) noexcept {
         statusLabel = kCopyCompleteLabel;
     } else if (status == CopyStatus::failed) {
         statusLabel = kCopyFailedLabel;
+    }
+    if (statusLabel == nullptr) {
+        return;
+    }
+
+    const float availableWidth = rowMaximumX - ImGui::GetItemRectMax().x;
+    const ImGuiStyle& style = ImGui::GetStyle();
+    if (copy_status_fits_inline(
+            availableWidth, style.ItemSpacing.x, ImGui::CalcTextSize(statusLabel).x)) {
+        ImGui::SameLine();
+    }
+    ImGui::TextDisabled("%s", statusLabel);
+}
+
+/** Wipes retained history and rotates the log file so the next test run starts clean. */
+void draw_clear_button() noexcept {
+    const float rowMaximumX = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+    if (ImGui::Button(kClearLabel)) {
+        g_clearStatus = log::clear() ? ClearStatus::cleared : ClearStatus::failed;
+    }
+    const char* statusLabel = nullptr;
+    if (g_clearStatus == ClearStatus::cleared) {
+        statusLabel = kClearCompleteLabel;
+    } else if (g_clearStatus == ClearStatus::failed) {
+        statusLabel = kClearFailedLabel;
     }
     if (statusLabel == nullptr) {
         return;
@@ -150,6 +187,7 @@ void draw() noexcept {
         ImGui::SameLine();
     }
     draw_copy_button(visible);
+    draw_clear_button();
     ImGui::Separator();
     draw_log_entries(visible, g_autoScroll && (logGrew || followTurnedOn));
 }
@@ -160,6 +198,7 @@ void reset() noexcept {
     filters::reset();
     g_autoScroll = true;
     g_recordedCount = 0;
+    g_clearStatus = ClearStatus::idle;
 }
 
 } // namespace sunrise::core::ui::modules::logs::internal

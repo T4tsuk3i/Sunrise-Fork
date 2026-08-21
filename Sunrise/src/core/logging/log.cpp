@@ -49,6 +49,10 @@ struct LogState {
     ULONGLONG startTick{};
     bool debuggerSink{};
     bool initialized{};
+    /** Loaded module the file sink was opened against, kept so clear() can reopen it. */
+    void* module{};
+    /** True once initialize() opened the file sink, so clear() knows whether to reopen it. */
+    bool fileSinkConfigured{};
 };
 
 LogState g_log;
@@ -145,6 +149,8 @@ bool initialize(void* module, const Settings& settings) noexcept {
     g_log.initialized = false;
     g_log.debuggerSink = settings.debuggerSink;
     g_log.startTick = GetTickCount64();
+    g_log.module = module;
+    g_log.fileSinkConfigured = settings.fileSink;
     for (std::size_t index = 0; index < g_log.levels.size(); ++index) {
         g_log.levels[index].store(settings.levels[index], std::memory_order_relaxed);
     }
@@ -178,6 +184,27 @@ void shutdown() noexcept {
     // The same lifetime lock excludes writers until both sinks and retained entries are empty.
     snapshot::internal::reset();
     ReleaseSRWLockExclusive(&g_log.lock);
+}
+
+/** Clears retained history and rotates the file sink so events start from a clean slate. */
+bool clear() noexcept {
+    AcquireSRWLockExclusive(&g_log.lock);
+    if (!g_log.initialized) {
+        ReleaseSRWLockExclusive(&g_log.lock);
+        return false;
+    }
+    snapshot::internal::reset();
+    g_log.startTick = GetTickCount64();
+    bool ready = true;
+    if (g_log.fileSinkConfigured) {
+        if (g_log.file != INVALID_HANDLE_VALUE) {
+            CloseHandle(g_log.file);
+        }
+        g_log.file = open_log_file(g_log.module);
+        ready = g_log.file != INVALID_HANDLE_VALUE;
+    }
+    ReleaseSRWLockExclusive(&g_log.lock);
+    return ready;
 }
 
 /** Writes one line straight to the debugger, bypassing the sinks and every threshold. */
