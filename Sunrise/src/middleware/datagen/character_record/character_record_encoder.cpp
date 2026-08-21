@@ -1,8 +1,10 @@
 #include "character_record_encoder.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
+#include "../../../core/logging/log.h"
 #include "appearance/internal.h"
 
 namespace sunrise::middleware::datagen::character_record {
@@ -48,9 +50,25 @@ constexpr std::size_t kPreviewFlagOffsets[]{8, 9};
     output.unusedFloatA = 1.0F;
     output.unusedFloatB = static_cast<float>(light);
     output.light = static_cast<float>(light);
-    if (!appearance::apply_render(instances, character.characterClass, output)
-        || !appearance::apply_stats(instances, light, output)
-        || !appearance::apply_ability_buckets(character, instances, output)) {
+    const bool renderOk = appearance::apply_render(instances, character.characterClass, output);
+    const bool statsOk = renderOk && appearance::apply_stats(instances, light, output);
+    const bool abilitiesOk =
+        statsOk && appearance::apply_ability_buckets(character, instances, output);
+    if (!renderOk || !statsOk || !abilitiesOk) {
+        char buf[160]{};
+        const int n = std::snprintf(buf,
+                                    sizeof buf,
+                                    "ev=character_record stage=build_shared result=fail "
+                                    "soid=0x%016llX render_ok=%d stats_ok=%d abilities_ok=%d",
+                                    static_cast<unsigned long long>(character.soid),
+                                    static_cast<int>(renderOk),
+                                    static_cast<int>(statsOk),
+                                    static_cast<int>(abilitiesOk));
+        if (n > 0) {
+            core::log::write(core::log::Channel::middleware,
+                             core::log::Level::warn,
+                             {buf, static_cast<std::size_t>(n)});
+        }
         return false;
     }
     // The ability buckets claim their overflow slots first; the gear hashes take what is left.

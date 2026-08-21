@@ -1,6 +1,8 @@
 #include <algorithm>
+#include <cstdio>
 #include <span>
 
+#include "../../../../../core/logging/log.h"
 #include "../../../../../middleware/datagen/character_record/character_record_encoder.h"
 #include "../../../../../middleware/datagen/definitions.h"
 #include "../../../../../middleware/datagen/family3/family3_roster.h"
@@ -35,8 +37,27 @@ namespace character_record = middleware::datagen::character_record;
     for (std::size_t index = 0; index < account.characterCount; ++index) {
         middleware::datagen::family4::loadout::ResolvedInstances instances{};
         std::int32_t light = 0;
-        if (!middleware::datagen::family4::loadout::resolve_instances(account, index, instances)
-            || !state::equipment::light::resolution::character_light(account, index, light)) {
+        const bool instancesOk =
+            middleware::datagen::family4::loadout::resolve_instances(account, index, instances);
+        const bool lightOk =
+            instancesOk
+            && state::equipment::light::resolution::character_light(account, index, light);
+        if (!instancesOk || !lightOk) {
+            char buf[160]{};
+            const int n =
+                std::snprintf(buf,
+                              sizeof buf,
+                              "ev=roster_snapshot stage=resolve result=fail index=%zu "
+                              "soid=0x%016llX instances_ok=%d light_ok=%d",
+                              index,
+                              static_cast<unsigned long long>(account.characters[index].soid),
+                              static_cast<int>(instancesOk),
+                              static_cast<int>(lightOk));
+            if (n > 0) {
+                core::log::write(core::log::Channel::server,
+                                 core::log::Level::warn,
+                                 {buf, static_cast<std::size_t>(n)});
+            }
             return false;
         }
         if (rawExtent > scratch.plaintext.size()
@@ -48,6 +69,14 @@ namespace character_record = middleware::datagen::character_record;
             std::span(scratch.plaintext).subspan(rawExtent, character_record::kFamily3RecordSize);
         if (!character_record::encode_family3(
                 account.characters[index], instances, light, record)) {
+            char buf[96]{};
+            const int n = std::snprintf(
+                buf, sizeof buf, "ev=roster_snapshot stage=encode result=fail index=%zu", index);
+            if (n > 0) {
+                core::log::write(core::log::Channel::server,
+                                 core::log::Level::warn,
+                                 {buf, static_cast<std::size_t>(n)});
+            }
             return false;
         }
         std::size_t compressedSize = 0;
@@ -82,6 +111,9 @@ bool prepare_roster(Scratch& scratch,
     const auto destination = std::span(scratch.plaintext).subspan(reservation.rawWriteOffset);
     std::size_t rawSize = 0;
     if (!middleware::datagen::family3::encode_roster(account, destination, rawSize)) {
+        core::log::write(core::log::Channel::server,
+                         core::log::Level::warn,
+                         "ev=roster_snapshot stage=encode_roster result=fail");
         return false;
     }
     Prepared staged{};
@@ -96,6 +128,9 @@ bool prepare_roster(Scratch& scratch,
                          compressedExtent,
                          staged.objects[objectCount],
                          listCompressed)) {
+        core::log::write(core::log::Channel::server,
+                         core::log::Level::warn,
+                         "ev=roster_snapshot stage=compress_list result=fail");
         return false;
     }
     compressedExtent += listCompressed;

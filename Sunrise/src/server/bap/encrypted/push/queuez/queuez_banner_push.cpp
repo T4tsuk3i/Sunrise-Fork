@@ -550,10 +550,15 @@ bool append_account_resync_roster_notification(Scratch& scratch,
             break;
         }
     }
+    // Deleting the last character leaves no record to refresh. Reporting that as a failure would
+    // keep the resync armed, and an armed resync blocks every other deferred push for the rest of
+    // the run; the roster list itself still republishes on the next Family-3 subscription.
+    if (selected == 0 || characterIndex >= account.characterCount) {
+        return true;
+    }
     queuez::RosterAppearanceRefresh refresh{};
     snapshot::Prepared prepared{};
-    if (selected == 0 || characterIndex >= account.characterCount
-        || !queuez::stage_roster_appearance_refresh(before, selected, true, refresh)
+    if (!queuez::stage_roster_appearance_refresh(before, selected, true, refresh)
         || !snapshot::prepare_roster_appearance_refresh(
             scratch, refresh, account.characters[characterIndex], characterIndex, prepared)
         || !append_roster_appearance_frame(

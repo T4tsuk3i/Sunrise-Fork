@@ -12,10 +12,13 @@ namespace sunrise::server::bap::encrypted::queuez {
 /** Stages the account-selection patch without changing the resident manifest. */
 bool stage_change_character(const SessionState& before, ChangeCharacter& change) noexcept {
     change = {};
+    // Any phase may re-arm a publish: normal starts a fresh cycle, and publishOnce/responseOnly
+    // mean an earlier roster change is still waiting on a character pick to reset the phase --
+    // a second change (e.g. create right after delete, before ever loading a character) must
+    // still reach the client, so it just re-bumps the version and stays in publishOnce.
     if (!valid(before) || !before.family4Active || !before.family3Active
         || before.family4RootSoid == 0 || before.family4ResidentCount == 0
-        || before.family4ResidentCount > before.family4Residents.size()
-        || before.family3Phase != Family3Phase::normal) {
+        || before.family4ResidentCount > before.family4Residents.size()) {
         return false;
     }
     const ResidentObject& account = before.family4Residents.front();

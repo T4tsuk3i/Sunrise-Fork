@@ -3,10 +3,12 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <optional>
 
+#include "../../../../core/logging/log.h"
 #include "../../../../state/unlocks/unlocks_runtime.h"
 #include "../instance/layout.h"
 #include "../progression/progression_bank_keys.h"
@@ -132,9 +134,29 @@ bool encode(const state::CharacterState& state,
             const loadout::ResolvedLoadout& resolvedLoadout,
             const state::equipment::light::Evaluation& lightEvaluation,
             std::span<std::byte> output) noexcept {
-    if (!valid(state) || !valid(resolvedLoadout)
-        || !summary_matches_loadout(resolvedLoadout, lightEvaluation)
-        || output.size() < layout::kObjectSize) {
+    const bool stateOk = valid(state);
+    const bool loadoutOk = valid(resolvedLoadout);
+    const bool summaryOk = loadoutOk && summary_matches_loadout(resolvedLoadout, lightEvaluation);
+    const bool sizeOk = output.size() >= layout::kObjectSize;
+    if (!stateOk || !loadoutOk || !summaryOk || !sizeOk) {
+        char buf[192]{};
+        const int n = std::snprintf(buf,
+                                    sizeof buf,
+                                    "ev=character_encode stage=validate result=fail "
+                                    "soid=0x%016llX state_ok=%d loadout_ok=%d summary_ok=%d "
+                                    "size_ok=%d items=%zu next_serial=%u",
+                                    static_cast<unsigned long long>(state.soid),
+                                    static_cast<int>(stateOk),
+                                    static_cast<int>(loadoutOk),
+                                    static_cast<int>(summaryOk),
+                                    static_cast<int>(sizeOk),
+                                    resolvedLoadout.itemCount,
+                                    resolvedLoadout.nextInventorySerial);
+        if (n > 0) {
+            core::log::write(core::log::Channel::middleware,
+                             core::log::Level::warn,
+                             {buf, static_cast<std::size_t>(n)});
+        }
         return false;
     }
 
@@ -162,10 +184,16 @@ bool encode(const state::CharacterState& state,
             index < unlocks.characterObjectValues.size() ? unlocks.characterObjectValues[index] : 0;
     }
     if (!build_equipment_summary(lightEvaluation, object.equipmentSummary)) {
+        core::log::write(core::log::Channel::server,
+                         core::log::Level::warn,
+                         "ev=character_encode stage=equipment_summary result=fail");
         return false;
     }
     if (!progression::key_bank(state::build_data::progressions::Scope::character,
                                object.progressions)) {
+        core::log::write(core::log::Channel::server,
+                         core::log::Level::warn,
+                         "ev=character_encode stage=progression result=fail");
         return false;
     }
     object.nextInventorySerial = resolvedLoadout.nextInventorySerial;

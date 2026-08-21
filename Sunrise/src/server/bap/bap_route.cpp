@@ -21,13 +21,20 @@ std::uint64_t g_accountGeneration{};
 
 /** Arms every other active peer after one shared-account transaction is published. */
 void publish_account_mutation(Session& origin) noexcept {
+    // A roster edit rewrites the account body itself. Every other mutation shows the origin its
+    // own result through the correlated increment it already published, but the character-select
+    // screen reads that body only when the client enters it, so the peer that created or deleted
+    // a character needs the same full refresh a remote peer is armed for -- that refresh is what
+    // makes the client tear the screen down and rebuild it from the new body.
+    const bool rosterEdit = origin.rosterMutationPublished;
     origin.accountMutationPublished = false;
+    origin.rosterMutationPublished = false;
     g_accountGeneration = g_accountGeneration == (std::numeric_limits<std::uint64_t>::max)()
                               ? 1
                               : g_accountGeneration + 1;
     origin.accountGeneration = g_accountGeneration;
     origin.accountResyncGeneration = g_accountGeneration;
-    origin.accountResyncArmed = false;
+    origin.accountResyncArmed = rosterEdit;
     std::size_t armed = 0;
     for (auto& peer : g_sessions) {
         if (&peer == &origin || peer.id == 0 || !peer.authenticated || !peer.queuez.family4Active) {
@@ -41,10 +48,11 @@ void publish_account_mutation(Session& origin) noexcept {
     const int count = std::snprintf(line.data(),
                                     line.size(),
                                     "ev=queuez stage=peer_resync_arm result=ok generation=%llu "
-                                    "origin=%u peers=%zu",
+                                    "origin=%u peers=%zu roster_edit=%u",
                                     static_cast<unsigned long long>(g_accountGeneration),
                                     origin.id,
-                                    armed);
+                                    armed,
+                                    static_cast<unsigned>(rosterEdit));
     if (count > 0) {
         core::log::write(core::log::Channel::server,
                          core::log::Level::debug,
