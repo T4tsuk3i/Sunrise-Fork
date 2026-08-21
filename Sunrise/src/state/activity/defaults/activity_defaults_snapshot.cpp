@@ -6,6 +6,7 @@
 #include <string_view>
 
 #include "../../runtime/storage/internal.h"
+#include "../cutscene/activity_cutscene_route.h"
 
 namespace sunrise::state::activity::defaults {
 namespace {
@@ -22,6 +23,9 @@ void snapshot(ActivityDefaults& output) noexcept {
     AcquireSRWLockShared(&runtime::storage::g_stateLock);
     output = runtime::storage::g_state.activity.defaults;
     ReleaseSRWLockShared(&runtime::storage::g_stateLock);
+    // An owed opening cutscene replaces the authored default, so every message built
+    // from this snapshot names the same place the player is actually going.
+    (void)cutscene::apply(output);
 }
 
 /** Applies any authored arrival override for one destination onto its selection. */

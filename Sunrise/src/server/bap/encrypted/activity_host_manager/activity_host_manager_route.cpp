@@ -10,6 +10,7 @@
 #include "../../../../middleware/bap/activity_host_manager/request/selection/\
 activity_manager_selection_parser.h"
 #include "../../../../middleware/bap/activity_host_manager/response/activity_manager_response.h"
+#include "../../../../state/activity/cutscene/activity_cutscene_route.h"
 #include "../../../../state/activity/defaults/activity_defaults_snapshot.h"
 #include "../../../../state/activity/forced/activity_forced_destination.h"
 #include "../../../../state/activity/runtime.h"
@@ -134,6 +135,9 @@ prepare_allocation(const request_selection::ActivityManagerSelectionResult& pars
         }
         return state::activity::prepare_session(sessionId, allocation);
     }
+    // The player asked for somewhere specific, so any cutscene still owed from character
+    // select has been seen or skipped and the authored default takes over again.
+    state::activity::cutscene::disarm();
     report_selection(source);
     state::activity::destination::DestinationSelection destination{};
     destination.packageName = source.packageName;

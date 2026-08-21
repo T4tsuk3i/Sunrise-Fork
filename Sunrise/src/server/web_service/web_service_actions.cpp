@@ -15,6 +15,7 @@
 #include "../../middleware/web_service/messages/opcode801.h"
 #include "../../middleware/web_service/messages/opcode903.h"
 #include "../../state/account/account_state.h"
+#include "../../state/activity/cutscene/activity_cutscene_route.h"
 #include "../../state/build_data/runtime.h"
 #include "../../state/runtime/runtime.h"
 
@@ -212,6 +213,9 @@ void select_character(const middleware::web_service::Message& message, Outcome& 
     }
     outcome.hasSelectedCharacter = true;
     outcome.selectedCharacterSoid = picked.characterSoid;
+    // Homecoming has no mission node to launch, so its opening cutscene is owed from
+    // here: the first load after a character is picked plays it instead of the default.
+    state::activity::cutscene::arm(picked.characterSoid);
 
     std::array<char, kSelectLineCapacity> line{};
     const int written = std::snprintf(line.data(),
