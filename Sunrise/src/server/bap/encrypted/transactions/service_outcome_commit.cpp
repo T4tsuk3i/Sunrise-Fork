@@ -7,6 +7,7 @@
 #include "../../../../core/logging/log.h"
 #include "../../../../state/activity/runtime.h"
 #include "../../../../state/matchmaking/matchmaking_state.h"
+#include "../../../../state/runtime/persistence/state_persistence.h"
 #include "../../../../state/runtime/runtime.h"
 #include "../bap_connection_publication.h"
 #include "../internal.h"
@@ -190,6 +191,9 @@ bool commit(ServiceOutcome& outcome, Publication& publication) noexcept {
                          committed ? core::log::Level::debug : core::log::Level::warn,
                          committed ? "ev=equip stage=transaction_commit result=ok"
                                    : "ev=equip stage=transaction_commit result=fail");
+        if (committed) {
+            (void)state::runtime::persistence::save();
+        }
         if (committed && isSubclassSlot) {
             // The equipped subclass just changed, which makes the published ability buckets
             // stale the same way an ability-entry pick does. Wake the investment worker so the
@@ -205,6 +209,7 @@ bool commit(ServiceOutcome& outcome, Publication& publication) noexcept {
                          committed ? "ev=subclass_select stage=transaction_commit result=ok"
                                    : "ev=subclass_select stage=transaction_commit result=fail");
         if (committed) {
+            (void)state::runtime::persistence::save();
             // The published ability buckets are keyed off the selection that just changed; wake
             // the investment worker so its next pump rebuilds them instead of waiting on whatever
             // cadence would otherwise trigger a fresh slice.
@@ -218,6 +223,9 @@ bool commit(ServiceOutcome& outcome, Publication& publication) noexcept {
                          committed ? core::log::Level::debug : core::log::Level::warn,
                          committed ? "ev=acquire stage=transaction_commit result=ok"
                                    : "ev=acquire stage=transaction_commit result=fail");
+        if (committed) {
+            (void)state::runtime::persistence::save();
+        }
         return committed;
     }
     if (auto* transaction = transaction_if<SocketPlugTransaction>(outcome)) {
@@ -226,6 +234,9 @@ bool commit(ServiceOutcome& outcome, Publication& publication) noexcept {
                          committed ? core::log::Level::debug : core::log::Level::warn,
                          committed ? "ev=socket_plug stage=transaction_commit result=ok"
                                    : "ev=socket_plug stage=transaction_commit result=fail");
+        if (committed) {
+            (void)state::runtime::persistence::save();
+        }
         return committed;
     }
     if (auto* transaction = transaction_if<ItemStateTransaction>(outcome)) {
@@ -234,6 +245,9 @@ bool commit(ServiceOutcome& outcome, Publication& publication) noexcept {
                          committed ? core::log::Level::debug : core::log::Level::warn,
                          committed ? "ev=item_state stage=transaction_commit result=ok"
                                    : "ev=item_state stage=transaction_commit result=fail");
+        if (committed) {
+            (void)state::runtime::persistence::save();
+        }
         return committed;
     }
     if (auto* transaction = transaction_if<ProfileItemAcquisitionTransaction>(outcome)) {
@@ -242,6 +256,9 @@ bool commit(ServiceOutcome& outcome, Publication& publication) noexcept {
                          committed ? core::log::Level::debug : core::log::Level::warn,
                          committed ? "ev=profile_acquire stage=transaction_commit result=ok"
                                    : "ev=profile_acquire stage=transaction_commit result=fail");
+        if (committed) {
+            (void)state::runtime::persistence::save();
+        }
         return committed;
     }
     if (auto* transaction = transaction_if<ItemDismantleTransaction>(outcome)) {
@@ -250,6 +267,9 @@ bool commit(ServiceOutcome& outcome, Publication& publication) noexcept {
                          committed ? core::log::Level::debug : core::log::Level::warn,
                          committed ? "ev=dismantle stage=transaction_commit result=ok"
                                    : "ev=dismantle stage=transaction_commit result=fail");
+        if (committed) {
+            (void)state::runtime::persistence::save();
+        }
         return committed;
     }
     return true;

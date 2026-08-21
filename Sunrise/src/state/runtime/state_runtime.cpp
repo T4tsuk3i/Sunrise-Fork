@@ -14,6 +14,7 @@
 #include "../activity/defaults/activity_defaults_validation.h"
 #include "../build_data/runtime.h"
 #include "equipment/configured_equipment_identity.h"
+#include "persistence/state_persistence.h"
 #include "runtime.h"
 #include "state.h"
 #include "storage/internal.h"
@@ -198,6 +199,12 @@ bool initialize(void* module,
                 const AccountState& initialAccount,
                 const activity::defaults::ActivityDefaults& activityDefaults) noexcept {
     AccountState runtimeAccount = initialAccount;
+    (void)runtime::persistence::initialize(module);
+    const account::settings::AccountSettings authoredSettings = initialAccount.settings;
+    (void)runtime::persistence::load(runtimeAccount);
+    if (runtimeAccount.characterCount != 0 && !runtimeAccount.settings.configured) {
+        runtimeAccount.settings = authoredSettings;
+    }
     if (!seed_inventory_runtime_fields(runtimeAccount)
         || !activity::defaults::valid(activityDefaults)) {
         return false;
@@ -273,6 +280,7 @@ void shutdown() noexcept {
     AcquireSRWLockExclusive(&runtime::storage::g_stateLock);
     SecureZeroMemory(&runtime::storage::g_state, sizeof runtime::storage::g_state);
     ReleaseSRWLockExclusive(&runtime::storage::g_stateLock);
+    runtime::persistence::shutdown();
     build_data::shutdown();
 }
 
