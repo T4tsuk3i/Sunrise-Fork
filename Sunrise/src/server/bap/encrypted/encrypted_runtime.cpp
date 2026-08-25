@@ -45,6 +45,7 @@ bool consume(Session& session,
              std::size_t& written) noexcept {
     written = 0;
     session.accountMutationPublished = false;
+    session.rosterMutationPublished = false;
     if (!session.authenticated) {
         // Staying silent here looks the same as a decode fault, and both look like a dead link.
         core::log::write(core::log::Channel::server,
@@ -224,6 +225,7 @@ bool consume(Session& session,
                 session.activityKeepaliveDueTick = GetTickCount64() + kActivityKeepaliveIntervalMs;
             }
             session.accountMutationPublished = mutatesAccount;
+            session.rosterMutationPublished = outcome.hasRosterChange;
             if (transaction_if<EquipmentSwapTransaction>(outcome) != nullptr) {
                 std::array<char, core::log::kLineCapacity> line{};
                 const int count = std::snprintf(

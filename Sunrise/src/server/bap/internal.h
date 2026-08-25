@@ -170,6 +170,13 @@ struct Session {
     std::uint64_t accountResyncGeneration{};
     /** Set by encrypted processing only after one account mutation commits and is copied out. */
     bool accountMutationPublished{};
+    /**
+     * Set alongside the flag above when that mutation edited the roster itself, by creating or
+     * deleting a character. Those are the only mutations whose own correlated increment cannot
+     * show the peer its result, because the peer is sitting on the character-select screen and
+     * that screen reads the account body once, on entry.
+     */
+    bool rosterMutationPublished{};
     /** True while another peer's account mutation still needs a full local refresh. */
     bool accountResyncArmed{};
     /**

@@ -138,6 +138,9 @@
     <ClCompile Include="src\middleware\web_service\messages\opcode1820_codec.cpp" />
     <ClCompile Include="src\state\runtime\state_account_runtime.cpp" />
     <ClCompile Include="src\state\runtime\persistence\state_persistence.cpp" />
+    <ClCompile Include="src\middleware\web_service\messages\opcode501_request_codec.cpp" />
+    <ClCompile Include="src\middleware\web_service\messages\opcode502.cpp" />
+    <ClCompile Include="src\state\runtime\state_account_roster_runtime.cpp" />
     <ClCompile Include="src\state\runtime\state_account_acquisition_runtime.cpp" />
     <ClCompile Include="src\state\runtime\state_account_dismantle_runtime.cpp" />
     <ClCompile Include="src\state\runtime\state_account_dismantle_staging.cpp" />
@@ -1004,6 +1007,9 @@
     <ClInclude Include="src\state\unlocks\unlocks_runtime.h" />
     <ClInclude Include="src\state\runtime\runtime.h" />
     <ClInclude Include="src\state\runtime\persistence\state_persistence.h" />
+    <ClInclude Include="src\middleware\web_service\messages\opcode501_request_codec.h" />
+    <ClInclude Include="src\middleware\web_service\messages\opcode502.h" />
+    <ClInclude Include="src\state\runtime\state_account_roster_runtime.h" />
     <ClInclude Include="src\state\runtime\state_account_transaction_helpers.h" />
     <ClInclude Include="src\state\runtime\state_rolled_socket_plugs.h" />
     <ClInclude Include="src\state\runtime\state.h" />

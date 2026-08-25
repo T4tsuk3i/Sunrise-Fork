@@ -84,6 +84,13 @@ struct ServiceOutcome {
     middleware::bap::family_unsubscription::Request unsubscription{};
     bool hasChangeCharacter{};
     queuez::ChangeCharacter changeCharacter{};
+    /**
+     * Set when the change above is a roster edit (character created or deleted) rather than an
+     * opcode-505 return to character select. The account patch alone only reports that the account
+     * moved; a roster edit must also deliver the new Family-3 roster body, because the client is
+     * already sitting on the character-select screen and never re-subscribes to fetch it.
+     */
+    bool hasRosterChange{};
     bool hasSelectCharacter{};
     queuez::SelectCharacter selectCharacter{};
     /** One service owns at most one independently versioned transaction. */

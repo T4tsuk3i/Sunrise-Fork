@@ -15,6 +15,7 @@
 #include "../../middleware/web_service/messages/opcode205.h"
 #include "../../middleware/web_service/messages/opcode206.h"
 #include "../../middleware/web_service/messages/opcode501_codec.h"
+#include "../../middleware/web_service/messages/opcode501_request_codec.h"
 #include "../../middleware/web_service/messages/opcode503.h"
 #include "../../middleware/web_service/messages/opcode504.h"
 #include "../../middleware/web_service/messages/opcode601/opcode601_codec.h"
@@ -24,7 +25,11 @@
 #include "../../middleware/web_service/web_service_envelope.h"
 #include "../../state/account/account_state.h"
 #include "../../state/build_data/runtime.h"
+#include "../../state/runtime/persistence/state_persistence.h"
 #include "../../state/runtime/runtime.h"
+#include "../../state/runtime/state.h"
+#include "../../state/runtime/state_account_roster_runtime.h"
+#include "../../state/runtime/storage/internal.h"
 #include "opcode_routes.h"
 #include "web_service_actions.h"
 
@@ -241,15 +246,6 @@ bool consume(std::span<const std::byte> request,
                              "ev=ws503 stage=adopt result=fail");
         }
         return true;
-    }
-
-    if (message.opcode == middleware::web_service::messages::opcode501::kOpcode) {
-        // Returns a SOID family three already publishes. The request body is not parsed.
-        const std::uint64_t characterSoid =
-            state::account::selected_character_soid(state::account_snapshot());
-        return middleware::web_service::messages::opcode501::encode_response(
-                   message, characterSoid, response, written)
-               || encode_echo(message, response, written);
     }
 
     // Runs before the shared response-shape path, which would answer the success status.

@@ -11,8 +11,14 @@
 #include "../../../../middleware/bap/family_unsubscription.h"
 #include "../../../../middleware/bap/user_message/user_message_response.h"
 #include "../../../../middleware/encoding/byte_order.h"
+#include "../../../../middleware/web_service/messages/opcode501_codec.h"
+#include "../../../../middleware/web_service/messages/opcode501_request_codec.h"
+#include "../../../../middleware/web_service/messages/opcode502.h"
 #include "../../../../middleware/web_service/messages/opcode505/opcode505_codec.h"
+#include "../../../../state/runtime/persistence/state_persistence.h"
 #include "../../../../state/runtime/runtime.h"
+#include "../../../../state/runtime/state_account_roster_runtime.h"
+#include "../../../../state/runtime/storage/internal.h"
 #include "../../../web_service/web_service_runtime.h"
 #include "../activity_host_manager/activity_host_manager_route.h"
 #include "../activity_message/activity_message_route.h"
@@ -191,7 +197,207 @@ bool process(const ServiceRoute& route,
                     written);
             }
             outcome.hasChangeCharacter = true;
+            core::log::write(core::log::Channel::server,
+                             core::log::Level::info,
+                             "ev=ws505 stage=change result=ok");
             return true;
+        }
+        if (middleware::web_service::parse_request(requestBody, message)
+            && message.opcode == middleware::web_service::messages::opcode502::kOpcode) {
+            {
+                std::array<char, core::log::kLineCapacity> rawLine{};
+                const int rawPrefix = std::snprintf(
+                    rawLine.data(),
+                    rawLine.size(),
+                    "ev=ws502 stage=recv opcode=%u transaction=%u payload_bytes=%zu payload_hex=",
+                    static_cast<unsigned>(message.opcode),
+                    static_cast<unsigned>(message.transactionId),
+                    message.payload.size());
+                if (rawPrefix > 0 && static_cast<std::size_t>(rawPrefix) < rawLine.size()) {
+                    std::size_t rawLength = static_cast<std::size_t>(rawPrefix);
+                    (void)core::log::append_hex(rawLine, rawLength, message.payload);
+                    core::log::write(core::log::Channel::server,
+                                     core::log::Level::info,
+                                     {rawLine.data(), rawLength});
+                }
+            }
+            constexpr std::int32_t kRefusedStatus = 1;
+            middleware::web_service::messages::opcode502::Request deletionRequest{};
+            if (!middleware::web_service::messages::opcode502::parse_request(message,
+                                                                             deletionRequest)
+                || deletionRequest.characterSoid == 0) {
+                core::log::write(core::log::Channel::server,
+                                 core::log::Level::warn,
+                                 "ev=ws502 stage=parse result=fail");
+                middleware::web_service::StatusResponse status{};
+                status.code = kRefusedStatus;
+                return middleware::web_service::encode_response(
+                    message,
+                    middleware::web_service::ResponseShape::statusPair,
+                    status,
+                    output,
+                    written);
+            }
+            {
+                char pbuf[96]{};
+                const int pn =
+                    std::snprintf(pbuf,
+                                  sizeof pbuf,
+                                  "ev=ws502 stage=parse result=ok soid=0x%016llX",
+                                  static_cast<unsigned long long>(deletionRequest.characterSoid));
+                if (pn > 0) {
+                    core::log::write(core::log::Channel::server,
+                                     core::log::Level::info,
+                                     {pbuf, static_cast<std::size_t>(pn)});
+                }
+            }
+            AcquireSRWLockExclusive(&state::runtime::storage::g_stateLock);
+            state::AccountState account = state::runtime::storage::g_state.account;
+            if (!state::delete_character(account, deletionRequest.characterSoid)) {
+                ReleaseSRWLockExclusive(&state::runtime::storage::g_stateLock);
+                core::log::write(core::log::Channel::server,
+                                 core::log::Level::warn,
+                                 "ev=ws502 stage=delete result=fail");
+                middleware::web_service::StatusResponse status{};
+                status.code = kRefusedStatus;
+                return middleware::web_service::encode_response(
+                    message,
+                    middleware::web_service::ResponseShape::statusPair,
+                    status,
+                    output,
+                    written);
+            }
+            core::log::write(core::log::Channel::server,
+                             core::log::Level::info,
+                             "ev=ws502 stage=delete result=ok");
+            state::runtime::storage::g_state.account = account;
+            ReleaseSRWLockExclusive(&state::runtime::storage::g_stateLock);
+            (void)state::runtime::persistence::save();
+            if (!queuez::stage_change_character(queuezState, outcome.changeCharacter)) {
+                core::log::write(core::log::Channel::server,
+                                 core::log::Level::warn,
+                                 "ev=ws502 stage=change result=fail");
+                outcome.changeCharacter = {};
+            } else {
+                outcome.hasChangeCharacter = true;
+                outcome.hasRosterChange = true;
+            }
+            return middleware::web_service::encode_response(
+                message,
+                middleware::web_service::ResponseShape::statusPair,
+                middleware::web_service::StatusResponse{},
+                output,
+                written);
+        }
+        if (middleware::web_service::parse_request(requestBody, message)
+            && message.opcode == middleware::web_service::messages::opcode501::kOpcode) {
+            {
+                std::array<char, core::log::kLineCapacity> rawLine{};
+                const int rawPrefix = std::snprintf(
+                    rawLine.data(),
+                    rawLine.size(),
+                    "ev=ws501 stage=recv opcode=%u transaction=%u payload_bytes=%zu payload_hex=",
+                    static_cast<unsigned>(message.opcode),
+                    static_cast<unsigned>(message.transactionId),
+                    message.payload.size());
+                if (rawPrefix > 0 && static_cast<std::size_t>(rawPrefix) < rawLine.size()) {
+                    std::size_t rawLength = static_cast<std::size_t>(rawPrefix);
+                    (void)core::log::append_hex(rawLine, rawLength, message.payload);
+                    core::log::write(core::log::Channel::server,
+                                     core::log::Level::info,
+                                     {rawLine.data(), rawLength});
+                }
+            }
+            middleware::web_service::messages::opcode501::Request creationRequest{};
+            if (!middleware::web_service::messages::opcode501::parse_request(message,
+                                                                             creationRequest)) {
+                core::log::write(core::log::Channel::server,
+                                 core::log::Level::warn,
+                                 "ev=ws501 stage=parse result=fail");
+                // Opcode 501 always answers statusPair + SOID + absent trailer, even on
+                // refusal -- the generic statusPair-only shape omits the SOID field and the
+                // client fatally disconnects trying to decode it.
+                return middleware::web_service::messages::opcode501::encode_response(
+                    message, 0, output, written);
+            }
+            core::log::write(core::log::Channel::server,
+                             core::log::Level::info,
+                             "ev=ws501 stage=parse result=ok");
+            {
+                char rbuf[128]{};
+                int rn = std::snprintf(
+                    rbuf,
+                    sizeof rbuf,
+                    "ev=ws501 stage=fields class=%u gender=%u race=%u header_hex=%02X%02X%02X%02X",
+                    static_cast<unsigned>(creationRequest.characterClass),
+                    static_cast<unsigned>(creationRequest.gender),
+                    static_cast<unsigned>(creationRequest.race),
+                    static_cast<unsigned>(creationRequest.appearanceHeader[0]),
+                    static_cast<unsigned>(creationRequest.appearanceHeader[1]),
+                    static_cast<unsigned>(creationRequest.appearanceHeader[6]),
+                    static_cast<unsigned>(creationRequest.appearanceHeader[7]));
+                if (rn > 0) {
+                    core::log::write(core::log::Channel::server,
+                                     core::log::Level::info,
+                                     {rbuf, static_cast<std::size_t>(rn)});
+                }
+            }
+            AcquireSRWLockExclusive(&state::runtime::storage::g_stateLock);
+            state::AccountState account = state::runtime::storage::g_state.account;
+            {
+                char abuf[256]{};
+                const int an = std::snprintf(abuf,
+                                             sizeof abuf,
+                                             "ev=ws501 stage=account primary=0x%016llX "
+                                             "chars=%zu profileItems=%zu dismantleRewards=%zu "
+                                             "settings.configured=%d",
+                                             static_cast<unsigned long long>(account.primarySoid),
+                                             account.characterCount,
+                                             account.profileItemCount,
+                                             account.dismantleRewardCount,
+                                             static_cast<int>(account.settings.configured));
+                if (an > 0) {
+                    core::log::write(core::log::Channel::server,
+                                     core::log::Level::info,
+                                     {abuf, static_cast<std::size_t>(an)});
+                }
+            }
+            std::uint64_t characterSoid = 0;
+            if (!state::create_character(account,
+                                         creationRequest.characterClass,
+                                         creationRequest.gender,
+                                         creationRequest.race,
+                                         creationRequest.appearanceHeader,
+                                         characterSoid)) {
+                core::log::write(core::log::Channel::server,
+                                 core::log::Level::warn,
+                                 "ev=ws501 stage=create result=fail");
+                ReleaseSRWLockExclusive(&state::runtime::storage::g_stateLock);
+                return middleware::web_service::messages::opcode501::encode_response(
+                    message, 0, output, written);
+            }
+            core::log::write(core::log::Channel::server,
+                             core::log::Level::info,
+                             "ev=ws501 stage=create result=ok");
+            state::runtime::storage::g_state.account = account;
+            ReleaseSRWLockExclusive(&state::runtime::storage::g_stateLock);
+            (void)state::runtime::persistence::save();
+            if (!queuez::stage_change_character(queuezState, outcome.changeCharacter)) {
+                core::log::write(core::log::Channel::server,
+                                 core::log::Level::warn,
+                                 "ev=ws501 stage=change result=fail");
+                outcome.changeCharacter = {};
+            } else {
+                outcome.hasChangeCharacter = true;
+                outcome.hasRosterChange = true;
+            }
+            bool encOk = middleware::web_service::messages::opcode501::encode_response(
+                message, characterSoid, output, written);
+            core::log::write(core::log::Channel::server,
+                             core::log::Level::info,
+                             encOk ? "ev=ws501 stage=encode result=ok"
+                                   : "ev=ws501 stage=encode result=fail");
+            return encOk;
         }
         web_service::Outcome webOutcome;
         if (!sunrise::server::web_service::consume(requestBody, output, written, webOutcome)) {

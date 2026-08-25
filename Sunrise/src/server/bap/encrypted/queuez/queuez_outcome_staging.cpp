@@ -56,6 +56,10 @@ bool stage_service_outcome(Scratch& scratch,
         }
         middleware::secure_channel::advance_nonce(nonce);
         after = outcome.changeCharacter.after;
+        // A roster edit needs more than this patch, but not here: the account body and roster it
+        // owes are published as a full account resync on the next frame, armed for this same peer
+        // in publish_account_mutation. Sending an incremental roster here as well only bumps the
+        // Family-3 ladder twice for one edit.
     } else if (equipment != nullptr) {
         // Body processing already staged this exact after-image so the correlated opcode-403
         // response could promise its version. Reuse it here; staging a second revision would make
