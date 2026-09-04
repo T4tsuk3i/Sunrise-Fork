@@ -8,6 +8,38 @@
 #include "../queuez_state_validation.h"
 
 namespace sunrise::server::bap::encrypted::queuez {
+namespace {
+
+/**
+ * Logs which specific check inside stage_item_acquisition rejected the request. The caller only
+ * learns "queuez_preflight result=fail" otherwise, which turns every one of its many rejection
+ * sites into the same unexplained line.
+ * @param reason Short key naming the failing check.
+ * @param residentCount Connection's current family-4 resident count, for capacity context.
+ * @param instanceSoid The instance SOID State proposed, so it can be cross-checked against logged
+ *        resident SOIDs from other lines.
+ * @return False, for a direct return.
+ */
+[[nodiscard]] bool report_acquisition_stage_fail(const char* reason,
+                                                 std::uint16_t residentCount,
+                                                 std::uint64_t instanceSoid) noexcept {
+    std::array<char, 128> line{};
+    const int written = std::snprintf(line.data(),
+                                      line.size(),
+                                      "ev=acquire stage=queuez_preflight result=fail reason=%s"
+                                      " residents=%u instance=0x%016llX",
+                                      reason,
+                                      static_cast<unsigned>(residentCount),
+                                      static_cast<unsigned long long>(instanceSoid));
+    if (written > 0) {
+        core::log::write(core::log::Channel::server,
+                         core::log::Level::warn,
+                         {line.data(), static_cast<std::size_t>(written)});
+    }
+    return false;
+}
+
+} // namespace
 
 /** Stages the account-selection patch without changing the resident manifest. */
 bool stage_change_character(const SessionState& before, ChangeCharacter& change) noexcept {
@@ -383,18 +415,39 @@ bool stage_item_acquisition(const SessionState& before,
     std::uint32_t accountDefinitionId = 0;
     std::uint32_t characterDefinitionId = 0;
     std::uint32_t itemInstanceDefinitionId = 0;
-    if (!valid(before) || !before.family4Active || before.family4RootSoid == 0 || accountSoid == 0
-        || accountSoid != before.family4RootSoid || characterSoid == 0 || acquiredInstanceSoid == 0
-        || before.family4ResidentCount == 0
-        || before.family4ResidentCount >= before.family4Residents.size()
-        || before.family4Version == (std::numeric_limits<std::int32_t>::max)()
-        || !middleware::datagen::object_id(
+    if (!valid(before)) {
+        return report_acquisition_stage_fail(
+            "session_invalid", before.family4ResidentCount, acquiredInstanceSoid);
+    }
+    if (!before.family4Active || before.family4RootSoid == 0) {
+        return report_acquisition_stage_fail(
+            "family4_inactive", before.family4ResidentCount, acquiredInstanceSoid);
+    }
+    if (accountSoid == 0 || accountSoid != before.family4RootSoid) {
+        return report_acquisition_stage_fail(
+            "account_soid_mismatch", before.family4ResidentCount, acquiredInstanceSoid);
+    }
+    if (characterSoid == 0 || acquiredInstanceSoid == 0) {
+        return report_acquisition_stage_fail(
+            "missing_key", before.family4ResidentCount, acquiredInstanceSoid);
+    }
+    if (before.family4ResidentCount == 0
+        || before.family4ResidentCount >= before.family4Residents.size()) {
+        return report_acquisition_stage_fail(
+            "resident_capacity", before.family4ResidentCount, acquiredInstanceSoid);
+    }
+    if (before.family4Version == (std::numeric_limits<std::int32_t>::max)()) {
+        return report_acquisition_stage_fail(
+            "version_capacity", before.family4ResidentCount, acquiredInstanceSoid);
+    }
+    if (!middleware::datagen::object_id(
             kAccountFamilyType, middleware::datagen::kAccountSlot, accountDefinitionId)
         || !middleware::datagen::object_id(
             kAccountFamilyType, middleware::datagen::kCharacterSlot, characterDefinitionId)
         || !middleware::datagen::object_id(
             kAccountFamilyType, middleware::datagen::kItemInstanceSlot, itemInstanceDefinitionId)) {
-        return false;
+        return report_acquisition_stage_fail(
+            "definition_lookup", before.family4ResidentCount, acquiredInstanceSoid);
     }
 
     bool accountResident = false;
@@ -402,6 +455,22 @@ bool stage_item_acquisition(const SessionState& before,
     for (std::size_t index = 0; index < before.family4ResidentCount; ++index) {
         const ResidentObject& object = before.family4Residents[index];
         if (object.objectSoid == acquiredInstanceSoid) {
+            std::array<char, 160> line{};
+            const int written =
+                std::snprintf(line.data(),
+                              line.size(),
+                              "ev=acquire stage=queuez_preflight result=fail reason=already_resident"
+                              " residents=%u instance=0x%016llX resident_index=%zu"
+                              " resident_definition=%u",
+                              static_cast<unsigned>(before.family4ResidentCount),
+                              static_cast<unsigned long long>(acquiredInstanceSoid),
+                              index,
+                              static_cast<unsigned>(object.definitionId));
+            if (written > 0) {
+                core::log::write(core::log::Channel::server,
+                                 core::log::Level::warn,
+                                 {line.data(), static_cast<std::size_t>(written)});
+            }
             return false;
         }
         accountResident =
@@ -412,6 +481,20 @@ bool stage_item_acquisition(const SessionState& before,
             || (object.definitionId == characterDefinitionId && object.objectSoid == characterSoid);
     }
     if (!accountResident || !characterResident) {
+        std::array<char, 128> line{};
+        const int written = std::snprintf(line.data(),
+                                          line.size(),
+                                          "ev=acquire stage=queuez_preflight result=fail"
+                                          " reason=account_or_character_not_resident"
+                                          " residents=%u account_resident=%d character_resident=%d",
+                                          static_cast<unsigned>(before.family4ResidentCount),
+                                          static_cast<int>(accountResident),
+                                          static_cast<int>(characterResident));
+        if (written > 0) {
+            core::log::write(core::log::Channel::server,
+                             core::log::Level::warn,
+                             {line.data(), static_cast<std::size_t>(written)});
+        }
         return false;
     }
 

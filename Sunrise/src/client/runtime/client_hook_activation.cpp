@@ -13,6 +13,7 @@
 #include "../content/investment/worker.h"
 #include "../executable/image.h"
 #include "../hooks/assert_handler/assert_handler_lifecycle.h"
+#include "../hooks/banner/banner_hook_lifecycle.h"
 #include "../hooks/bitmap/bitmap_hook_lifecycle.h"
 #include "../hooks/bootflow/bootflow_hook_lifecycle.h"
 #include "../hooks/config_getter/config_getter_lifecycle.h"
@@ -28,6 +29,7 @@
 #include "../hooks/queuez/queuez_hook_lifecycle.h"
 #include "../hooks/retail_log/retail_log_lifecycle.h"
 #include "../hooks/teleport/runtime.h"
+#include "../hooks/vendor_banner/vendor_banner_retire.h"
 #include "../patterns/registry.h"
 #include "../targets/game.h"
 #include "internal.h"
@@ -164,6 +166,7 @@ void clear_game_targets() noexcept {
                                  : "ev=activate stage=package_keys result=fail");
     // Diagnostic capture reports its own outcome and never demotes this stage.
     (void)hooks::retail_log::install();
+    (void)hooks::vendor_banner::install();
     (void)hooks::assert_handler::install();
     (void)hooks::config_getter::install();
     // Boot-step fixes scan for their own single-site targets; each reports its own outcome.
@@ -185,6 +188,10 @@ void clear_game_targets() noexcept {
     // thing that separates "the client never saw our membership body" from "it saw it and the
     // world container still did not bind".
     (void)hooks::membership_probe::install();
+    // Binds the orbit banner component to the selected identity so it renders equipped light and
+    // emblem instead of staying at its constructed defaults. Attaches unconditionally, same as the
+    // other always-on hooks above.
+    (void)hooks::banner::install();
     content::investment::worker::activate();
     return true;
 }

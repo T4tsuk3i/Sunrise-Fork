@@ -205,8 +205,18 @@ bool initialize(void* module,
     if (runtimeAccount.characterCount != 0 && !runtimeAccount.settings.configured) {
         runtimeAccount.settings = authoredSettings;
     }
-    if (!seed_inventory_runtime_fields(runtimeAccount)
-        || !activity::defaults::valid(activityDefaults)) {
+    // Names which of the two gates below failed. account::valid's own reason already logs
+    // deeper detail; this line is only here so a boot failure at this point is distinguishable
+    // from one at seed's SOID-exhaustion path or defaults::valid.
+    if (const bool seedOk = seed_inventory_runtime_fields(runtimeAccount); !seedOk) {
+        core::log::write(core::log::Channel::state,
+                         core::log::Level::warn,
+                         "ev=state_boot stage=seed_inventory_runtime_fields result=fail");
+        return false;
+    } else if (!activity::defaults::valid(activityDefaults)) {
+        core::log::write(core::log::Channel::state,
+                         core::log::Level::warn,
+                         "ev=state_boot stage=activity_defaults_valid result=fail");
         return false;
     }
     if (!build_data::initialize(module, runtime::equipment::configured_hash(runtimeAccount))) {

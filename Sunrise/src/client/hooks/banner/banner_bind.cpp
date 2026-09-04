@@ -27,6 +27,22 @@ hooking::detour::Handle g_handle{};
 std::atomic<BannerTick> g_original{nullptr};
 std::atomic<unsigned> g_reported{0};
 
+// Temporary diagnostic: the detour installs cleanly but nothing downstream of it was ever
+// observed to log, which leaves it ambiguous whether tick() runs at all. Each flag logs its
+// milestone exactly once, first-observed, so one boot says where the chain actually stops.
+std::atomic_bool g_sawCall{false};
+std::atomic_bool g_sawNonNullSelf{false};
+std::atomic_bool g_sawAlreadyBound{false};
+std::atomic_bool g_sawIdentityUnresolved{false};
+std::atomic_bool g_sawIdentityResolved{false};
+
+void log_once(std::atomic_bool& flag, const char* line) noexcept {
+    bool expected = false;
+    if (flag.compare_exchange_strong(expected, true, std::memory_order_relaxed)) {
+        core::log::write(core::log::Channel::client, core::log::Level::info, line);
+    }
+}
+
 /** What the update body left in the component, read after it has run. */
 struct Published {
     std::int32_t light{};
@@ -96,6 +112,7 @@ void report(const Identity& identity, const void* self, const Published& publish
  * @return The tick's own result.
  */
 __declspec(noinline) std::int64_t __fastcall tick(void* self, std::int64_t frame) noexcept {
+    log_once(g_sawCall, "ev=banner stage=tick_called result=info");
     const BannerTick original = g_original.load(std::memory_order_acquire);
     if (original == nullptr) {
         return 0;
@@ -103,18 +120,22 @@ __declspec(noinline) std::int64_t __fastcall tick(void* self, std::int64_t frame
     if (self == nullptr) {
         return original(self, frame);
     }
+    log_once(g_sawNonNullSelf, "ev=banner stage=tick_self result=info self_nonnull=1");
     std::byte* const component = static_cast<std::byte*>(self);
     std::uint64_t account = 0;
     std::uint8_t family = 0;
     std::memcpy(&account, component + BannerLayout::accountKey, sizeof account);
     std::memcpy(&family, component + BannerLayout::family, sizeof family);
     if (account != 0 && family != kBannerFamilyNone) {
+        log_once(g_sawAlreadyBound, "ev=banner stage=tick_already_bound result=info");
         return original(self, frame);
     }
     const Identity identity = selected_identity();
     if (!identity.resolved) {
+        log_once(g_sawIdentityUnresolved, "ev=banner stage=tick_identity_unresolved result=info");
         return original(self, frame);
     }
+    log_once(g_sawIdentityResolved, "ev=banner stage=tick_identity_resolved result=info");
     std::memcpy(component + BannerLayout::accountKey, &identity.account, sizeof identity.account);
     std::memcpy(
         component + BannerLayout::characterKey, &identity.character, sizeof identity.character);

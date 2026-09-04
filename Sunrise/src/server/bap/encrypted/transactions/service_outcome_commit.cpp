@@ -9,6 +9,7 @@
 #include "../../../../state/matchmaking/matchmaking_state.h"
 #include "../../../../state/runtime/persistence/state_persistence.h"
 #include "../../../../state/runtime/runtime.h"
+#include "../../../../state/vendors/answered_interactions.h"
 #include "../bap_connection_publication.h"
 #include "../internal.h"
 
@@ -226,6 +227,11 @@ bool commit(ServiceOutcome& outcome, Publication& publication) noexcept {
         if (committed) {
             (void)state::runtime::persistence::save();
         }
+        // The item is in the inventory, so the interaction that offered it is answered. This is
+        // the point the shipped game appends its own entry, and why the answer waited.
+        if (committed && transaction->answeredVendor != state::vendors::kAbsentIndex) {
+            (void)state::vendors::answer_shown(transaction->answeredVendor);
+        }
         return committed;
     }
     if (auto* transaction = transaction_if<SocketPlugTransaction>(outcome)) {
@@ -258,6 +264,9 @@ bool commit(ServiceOutcome& outcome, Publication& publication) noexcept {
                                    : "ev=profile_acquire stage=transaction_commit result=fail");
         if (committed) {
             (void)state::runtime::persistence::save();
+        }
+        if (committed && transaction->answeredVendor != state::vendors::kAbsentIndex) {
+            (void)state::vendors::answer_shown(transaction->answeredVendor);
         }
         return committed;
     }

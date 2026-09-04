@@ -3,9 +3,36 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
+
+#include "../../core/logging/log.h"
 
 namespace sunrise::state::account {
 namespace {
+
+/**
+ * Logs which specific check inside valid_impl rejected the account. Every caller upstream (state
+ * boot, persistence load) otherwise only learns "invalid" with no reason, which turns any real
+ * rejection into a silent, unexplained boot failure.
+ * @param reason Short key naming the failing check.
+ * @param detail Optional formatted detail (e.g. an index or hash) appended after reason.
+ * @return False, for a direct return.
+ */
+[[nodiscard]] bool report_invalid(const char* reason, const char* detail = "") noexcept {
+    std::array<char, 128> line{};
+    const int written = std::snprintf(line.data(),
+                                      line.size(),
+                                      "ev=account_valid stage=%s result=fail%s%s",
+                                      reason,
+                                      detail[0] != '\0' ? " " : "",
+                                      detail);
+    if (written > 0) {
+        core::log::write(core::log::Channel::state,
+                         core::log::Level::warn,
+                         {line.data(), static_cast<std::size_t>(written)});
+    }
+    return false;
+}
 
 /** Enough fixed storage for every account, character, profile-stack, and character-item key. */
 inline constexpr std::size_t kIdentityCapacity =
@@ -77,68 +104,103 @@ constexpr std::uint8_t kDismantleClassMaskBits =
 [[nodiscard]] bool valid_impl(const AccountState& state) noexcept {
     if (state.profileItemCount > state.profileItems.size()
         || state.characterCount > state.characters.size()) {
-        return false;
+        return report_invalid("count_capacity");
     }
     if (state.primarySoid == 0) {
         if (state.profileItemCount != 0 || state.characterCount != 0
             || state.dismantleRewardCount != 0 || state.settings.configured
             || state.settings.keyBindings.configured) {
-            return false;
+            return report_invalid("empty_account_nonzero_fields");
         }
-        return std::all_of(
-                   state.profileItems.cbegin(), state.profileItems.cend(), empty_profile_item)
-               && std::all_of(state.dismantleRewards.cbegin(),
-                              state.dismantleRewards.cend(),
-                              empty_dismantle_reward);
+        if (!std::all_of(
+                state.profileItems.cbegin(), state.profileItems.cend(), empty_profile_item)) {
+            return report_invalid("empty_account_stale_profile_item");
+        }
+        if (!std::all_of(state.dismantleRewards.cbegin(),
+                         state.dismantleRewards.cend(),
+                         empty_dismantle_reward)) {
+            return report_invalid("empty_account_stale_dismantle_reward");
+        }
+        return true;
     }
-    if (!settings::valid(state.settings) || !valid_dismantle_rewards(state)) {
-        return false;
+    if (!settings::valid(state.settings)) {
+        return report_invalid("settings");
+    }
+    if (!valid_dismantle_rewards(state)) {
+        return report_invalid("dismantle_rewards");
     }
 
     std::array<std::uint64_t, kIdentityCapacity> identities{};
     std::size_t identityCount = 0;
     if (!append_identity(identities, identityCount, state.primarySoid)) {
-        return false;
+        return report_invalid("primary_soid");
     }
     for (std::size_t index = 0; index < state.profileItems.size(); ++index) {
         const inventory::ProfileItem& item = state.profileItems[index];
+        char detail[32]{};
+        std::snprintf(detail, sizeof detail, "index=%zu", index);
         if (index >= state.profileItemCount) {
             if (!empty_profile_item(item)) {
-                return false;
+                return report_invalid("profile_item_tail_not_empty", detail);
             }
             continue;
         }
-        if (item.definitionHash == inventory::kNoDefinitionHash || item.quantity <= 0
-            || item.mutationSerial < 0
-            || (item.instanceSoid != 0
-                && !append_identity(identities, identityCount, item.instanceSoid))) {
-            return false;
+        if (item.definitionHash == inventory::kNoDefinitionHash) {
+            return report_invalid("profile_item_definition_hash", detail);
+        }
+        if (item.quantity <= 0) {
+            return report_invalid("profile_item_quantity", detail);
+        }
+        if (item.mutationSerial < 0) {
+            return report_invalid("profile_item_mutation_serial", detail);
+        }
+        if (item.instanceSoid != 0
+            && !append_identity(identities, identityCount, item.instanceSoid)) {
+            return report_invalid("profile_item_instance_soid_duplicate", detail);
         }
     }
 
     bool selected = false;
     for (std::size_t index = 0; index < state.characterCount; ++index) {
         const CharacterState& character = state.characters[index];
-        if (!append_identity(identities, identityCount, character.soid)
-            || (character.selected && selected) || character.race > CharacterRace::exo
-            || character.gender > CharacterGender::female
-            || character.characterClass > CharacterClass::warlock
-            || !std::isfinite(character.appearanceValue) || !inventory::valid(character.equipment)
-            || !inventory::valid(character.inventory)) {
-            return false;
+        char detail[32]{};
+        std::snprintf(detail, sizeof detail, "char=%zu", index);
+        if (!append_identity(identities, identityCount, character.soid)) {
+            return report_invalid("character_soid_duplicate", detail);
+        }
+        if (character.selected && selected) {
+            return report_invalid("character_multiple_selected", detail);
+        }
+        if (character.race > CharacterRace::exo) {
+            return report_invalid("character_race_range", detail);
+        }
+        if (character.gender > CharacterGender::female) {
+            return report_invalid("character_gender_range", detail);
+        }
+        if (character.characterClass > CharacterClass::warlock) {
+            return report_invalid("character_class_range", detail);
+        }
+        if (!std::isfinite(character.appearanceValue)) {
+            return report_invalid("character_appearance_value", detail);
+        }
+        if (!inventory::valid(character.equipment)) {
+            return report_invalid("character_equipment", detail);
+        }
+        if (!inventory::valid(character.inventory)) {
+            return report_invalid("character_inventory", detail);
         }
         selected = selected || character.selected;
         for (const std::optional<inventory::Item>& item : character.equipment.slots) {
             if (item.has_value()
                 && !append_identity(identities, identityCount, item->instanceSoid)) {
-                return false;
+                return report_invalid("character_equipment_instance_soid_duplicate", detail);
             }
         }
         for (std::size_t itemIndex = 0; itemIndex < character.inventory.count; ++itemIndex) {
             if (!append_identity(identities,
                                  identityCount,
                                  character.inventory.values[itemIndex].instanceSoid)) {
-                return false;
+                return report_invalid("character_inventory_instance_soid_duplicate", detail);
             }
         }
     }

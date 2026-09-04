@@ -1,6 +1,7 @@
 #include "../../core/logging/log.h"
 #include "../content/investment/worker.h"
 #include "../hooks/assert_handler/assert_handler_lifecycle.h"
+#include "../hooks/banner/banner_hook_lifecycle.h"
 #include "../hooks/bitmap/bitmap_hook_lifecycle.h"
 #include "../hooks/bootflow/bootflow_hook_lifecycle.h"
 #include "../hooks/config_getter/config_getter_lifecycle.h"
@@ -69,6 +70,7 @@ bool shutdown() noexcept {
     hooks::noclip::uninstall();
     hooks::teleport::uninstall();
     hooks::queuez::uninstall();
+    hooks::banner::uninstall();
     if (!hooks::config_getter::uninstall()) {
         ReleaseSRWLockExclusive(&runtime::g_lock);
         return false;
