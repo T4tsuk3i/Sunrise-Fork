@@ -5,7 +5,16 @@
  * from then on.
  *
  * The file uses the same hand-rolled JSON conventions as settings.json and the other stores.
- * Writes are atomic: staged to a .new file and moved over the target.
+ * Writes are atomic: staged to a .new file and moved over the target. Before that, the two most
+ * recent generations are kept as best-effort .bak / .bak2 backups, each with its own .sum
+ * checksum sidecar (FNV-1a) that travels with it through the rotation. A source whose sidecar
+ * does not match is treated the same as one that fails to parse: `load` moves on to the next.
+ *
+ * A mutation does not write to disk itself: it marks the account dirty (`request_save`) and a
+ * background thread flushes it within `kSaveIntervalMs`. Writing the whole account on every
+ * single equip, dismantle or socket plug would put a full serialize-and-write on the critical
+ * path of every mutation; a short-lived flush thread coalesces a burst of mutations into one
+ * write instead.
  */
 
 #include "state_persistence.h"
@@ -13,11 +22,14 @@
 #include <Windows.h>
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <limits>
+#include <memory>
+#include <span>
 #include <string_view>
-#include <vector>
 
 #include "../../../core/filesystem/path.h"
 #include "../../../core/logging/log.h"
@@ -30,6 +42,24 @@ namespace {
 constexpr std::wstring_view kFileSuffix = L"\\state.json";
 /** Staging suffix for atomic writes. */
 constexpr std::wstring_view kStageSuffix = L".new";
+/** Suffix of the newest best-effort backup: the generation the most recent save replaced. */
+constexpr std::wstring_view kBackupSuffix = L".bak";
+/** Suffix of the older best-effort backup: the generation before that one. */
+constexpr std::wstring_view kBackup2Suffix = L".bak2";
+/**
+ * Suffix of a source file's checksum sidecar, appended to that source's own path.
+ * Kept as a fixed-width hex sidecar rather than a field inside the JSON: folding it into the
+ * document would need excluding the field's own bytes from what it covers, which the emitter's
+ * single forward pass cannot do without a second pass over the buffer. A missing or unreadable
+ * sidecar is never a failure on its own -- an older save predates this feature -- only a mismatch
+ * against a sidecar that IS there is.
+ */
+constexpr std::wstring_view kChecksumSuffix = L".sum";
+/** FNV-1a constants, the same ones this codebase already uses elsewhere for content fingerprints. */
+constexpr std::uint64_t kHashOffsetBasis = 14695981039346656037ULL;
+constexpr std::uint64_t kHashPrime = 1099511628211ULL;
+/** Hex digits an emitted checksum sidecar holds: one 64-bit FNV-1a value. */
+constexpr std::size_t kChecksumHexDigits = 16;
 /**
  * Longest form one item, profile row and character can take in this document: every field
  * present, every plug filled, with slack for the indentation the emitter adds.
@@ -47,51 +77,124 @@ constexpr std::size_t kCharacterBudget =
 constexpr std::size_t kFileCapacity =
     4096 + account::inventory::kProfileItemCapacity * kProfileItemBudget
     + state::kCharacterCapacity * kCharacterBudget;
+/**
+ * A document at or past this size gets a warning on an otherwise-successful save.
+ * `flush_now` already refuses to write past `kFileCapacity` outright; this exists so that
+ * refusal is never the first sign of trouble; the log carries a standing warning for as long as
+ * the account stays this full, which is the cue to raise the budgets above before it is reached.
+ */
+constexpr std::size_t kCapacityWarnThreshold = kFileCapacity * 9 / 10;
 
 core::path::Buffer g_path{};
 bool g_pathResolved{};
 
+/**
+ * Flush thread state. Two flushes must never run concurrently, and the design already guarantees
+ * that: only `flush_thread` calls `flush_now`, `shutdown` never calls it directly, and a mutation
+ * arriving with no thread running (creation failed at boot) writes synchronously from
+ * `request_save` on the caller's own thread instead of ever touching the flag below.
+ */
+std::atomic<bool> g_dirty{};
+std::atomic<bool> g_running{};
+bool g_threadReady{};
+HANDLE g_thread{};
+HANDLE g_wakeEvent{};
+
+/**
+ * What one flush attempt produced.
+ * The distinction matters to `flush_if_dirty`: a transient failure (a locked file, a momentarily
+ * busy disk) is worth retrying on the next tick, but a permanent one (the account no longer fits
+ * `kFileCapacity`) is not -- it will not resolve itself, and retrying it every tick forever would
+ * just repeat the same full serialize-and-allocate for nothing until the capacity constants or
+ * the account itself change. `report_capacity_high` already gives standing warning before that
+ * point is ever reached, which is the actionable signal for a permanent failure, not a busy loop.
+ */
+enum class FlushResult : std::uint8_t { written, transientFailure, permanentFailure };
+
+[[nodiscard]] FlushResult flush_now() noexcept;
+
+/**
+ * Flushes once if the account is dirty, leaving the flag set only on a transient failure.
+ * Clearing the flag before the write, as a plain exchange would, drops a transient failure's
+ * mutation until an unrelated future one happens to mark the account dirty again; clearing it
+ * unconditionally after a permanent one, on the other hand, would busy-retry a problem that
+ * cannot resolve itself. Only `written` and `permanentFailure` clear the flag.
+ */
+void flush_if_dirty() noexcept {
+    if (!g_dirty.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (flush_now() != FlushResult::transientFailure) {
+        g_dirty.store(false, std::memory_order_release);
+    }
+}
+
+/** Wakes on the shorter of the save interval or a shutdown signal, and flushes when dirty. */
+DWORD WINAPI flush_thread(LPVOID) noexcept {
+    while (g_running.load(std::memory_order_acquire)) {
+        WaitForSingleObject(g_wakeEvent, kSaveIntervalMs);
+        flush_if_dirty();
+    }
+    // The wake that ends the loop above still needs to carry a mutation made just before it.
+    flush_if_dirty();
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
-// JSON emitter — builds a growable document via append operations.
+// JSON emitter — builds a fixed-capacity document via bounds-checked appends.
 // ---------------------------------------------------------------------------
 
 struct Document {
-    std::vector<char> buf{};
+    std::array<char, kFileCapacity> buf{};
+    std::size_t size{};
+    /** Set once an append would exceed `buf`. The document is never written in that state. */
+    bool overflowed{};
 };
 
+void append(Document& doc, const char* data, std::size_t length) noexcept {
+    if (doc.overflowed || length > doc.buf.size() - doc.size) {
+        doc.overflowed = true;
+        return;
+    }
+    std::memcpy(doc.buf.data() + doc.size, data, length);
+    doc.size += length;
+}
+void append(Document& doc, char value) noexcept {
+    append(doc, &value, 1);
+}
+
 void open_object(Document& doc) noexcept {
-    doc.buf.push_back('{');
+    append(doc, '{');
 }
 void close_object(Document& doc) noexcept {
-    doc.buf.push_back('}');
+    append(doc, '}');
 }
 void open_array(Document& doc) noexcept {
-    doc.buf.push_back('[');
+    append(doc, '[');
 }
 void close_array(Document& doc) noexcept {
-    doc.buf.push_back(']');
+    append(doc, ']');
 }
 void comma(Document& doc) noexcept {
-    doc.buf.push_back(',');
+    append(doc, ',');
 }
 void colon(Document& doc) noexcept {
-    doc.buf.push_back(':');
+    append(doc, ':');
 }
 void newline(Document& doc) noexcept {
-    doc.buf.push_back('\n');
+    append(doc, '\n');
 }
 void indent(Document& doc, int depth) noexcept {
     for (int i = 0; i < depth; ++i) {
-        doc.buf.push_back(' ');
-        doc.buf.push_back(' ');
+        append(doc, ' ');
+        append(doc, ' ');
     }
 }
 
 void emit_quoted(Document& doc, const char* key) noexcept {
-    doc.buf.push_back('"');
-    const std::size_t len = std::strlen(key);
-    doc.buf.insert(doc.buf.end(), key, key + len);
-    doc.buf.push_back('"');
+    append(doc, '"');
+    append(doc, key, std::strlen(key));
+    append(doc, '"');
 }
 
 void emit_hex(Document& doc, std::uint64_t value) noexcept {
@@ -99,7 +202,7 @@ void emit_hex(Document& doc, std::uint64_t value) noexcept {
     const int len =
         std::snprintf(buf, sizeof(buf), "0x%016llX", static_cast<unsigned long long>(value));
     if (len > 0) {
-        doc.buf.insert(doc.buf.end(), buf, buf + len);
+        append(doc, buf, static_cast<std::size_t>(len));
     }
 }
 
@@ -107,7 +210,7 @@ void emit_uint(Document& doc, std::uint64_t value) noexcept {
     char buf[32]{};
     const int len = std::snprintf(buf, sizeof(buf), "%llu", static_cast<unsigned long long>(value));
     if (len > 0) {
-        doc.buf.insert(doc.buf.end(), buf, buf + len);
+        append(doc, buf, static_cast<std::size_t>(len));
     }
 }
 
@@ -115,7 +218,7 @@ void emit_int(Document& doc, std::int32_t value) noexcept {
     char buf[32]{};
     const int len = std::snprintf(buf, sizeof(buf), "%d", static_cast<int>(value));
     if (len > 0) {
-        doc.buf.insert(doc.buf.end(), buf, buf + len);
+        append(doc, buf, static_cast<std::size_t>(len));
     }
 }
 
@@ -123,13 +226,13 @@ void emit_float(Document& doc, float value) noexcept {
     char buf[64]{};
     const int len = std::snprintf(buf, sizeof(buf), "%g", static_cast<double>(value));
     if (len > 0) {
-        doc.buf.insert(doc.buf.end(), buf, buf + len);
+        append(doc, buf, static_cast<std::size_t>(len));
     }
 }
 
 void emit_bool(Document& doc, bool value) noexcept {
     const char* text = value ? "true" : "false";
-    doc.buf.insert(doc.buf.end(), text, text + std::strlen(text));
+    append(doc, text, std::strlen(text));
 }
 
 void emit_key(Document& doc, const char* key, int depth) noexcept {
@@ -145,8 +248,7 @@ void emit_key(Document& doc, const char* key, int depth) noexcept {
 /** Emits the captured appearance header, or null for a character that never carried one. */
 void emit_appearance_header(Document& doc, const state::CharacterState& c) noexcept {
     if (!c.appearanceHeaderValid) {
-        const char* n = "null";
-        doc.buf.insert(doc.buf.end(), n, n + 4);
+        append(doc, "null", 4);
         return;
     }
     open_array(doc);
@@ -161,8 +263,7 @@ void emit_sockets(Document& doc,
                   const account::inventory::Sockets& sockets,
                   int /*depth*/) noexcept {
     if (sockets.policy == account::inventory::SocketPolicy::nativeDefaults) {
-        const char* n = "null";
-        doc.buf.insert(doc.buf.end(), n, n + 4);
+        append(doc, "null", 4);
         return;
     }
     open_array(doc);
@@ -171,8 +272,7 @@ void emit_sockets(Document& doc,
         if (sockets.plugs[i].has_value()) {
             emit_uint(doc, *sockets.plugs[i]);
         } else {
-            const char* n = "null";
-            doc.buf.insert(doc.buf.end(), n, n + 4);
+            append(doc, "null", 4);
         }
     }
     close_array(doc);
@@ -828,19 +928,19 @@ private:
                 item.flags = static_cast<std::uint32_t>(v);
             } else if (key == "armor_archetype") {
                 std::uint64_t v = 0;
-                if (!parse_uint(v) || v > account::inventory::kArmorArchetypeNone) return false;
+                if (!parse_uint(v) || v > account::inventory::kArmorArchetypeMaximum) return false;
                 item.armorArchetype = static_cast<std::uint8_t>(v);
             } else if (key == "armor_gear_tier") {
                 std::uint64_t v = 0;
-                if (!parse_uint(v) || v > account::inventory::kArmorGearTierNone) return false;
+                if (!parse_uint(v) || v > account::inventory::kArmorGearTierMaximum) return false;
                 item.armorGearTier = static_cast<std::uint8_t>(v);
             } else if (key == "armor_masterwork_level") {
                 std::uint64_t v = 0;
-                if (!parse_uint(v) || v > account::inventory::kArmorMasterworkNone) return false;
+                if (!parse_uint(v) || v > account::inventory::kArmorMasterworkMaximum) return false;
                 item.armorMasterworkLevel = static_cast<std::uint8_t>(v);
             } else if (key == "armor_set_hash") {
                 std::uint64_t v = 0;
-                if (!parse_uint(v) || v > 0xFFFFFFFFULL) return false;
+                if (!parse_uint(v) || v > (std::numeric_limits<std::uint32_t>::max)()) return false;
                 item.armorSetHash = static_cast<std::uint32_t>(v);
             } else if (key == "plugs") {
                 if (!parse_sockets(item.sockets)) return false;
@@ -998,8 +1098,194 @@ void report_fail(const char* reason) noexcept {
     }
 }
 
-[[nodiscard]] bool write_document(const std::vector<char>& doc) noexcept {
-    if (!g_pathResolved || doc.empty()) return false;
+/** Warns once a save is large enough that `kFileCapacity` is a real ceiling, not a formality. */
+void report_capacity_high(std::size_t used, std::size_t capacity) noexcept {
+    std::array<char, 96> line{};
+    const int written = std::snprintf(line.data(),
+                                      line.size(),
+                                      "ev=state_persistence stage=persist result=near_capacity "
+                                      "used=%zu capacity=%zu",
+                                      used,
+                                      capacity);
+    if (written > 0) {
+        core::log::write(core::log::Channel::state,
+                         core::log::Level::warn,
+                         {line.data(), static_cast<std::size_t>(written)});
+    }
+}
+
+/**
+ * Notes a load that took the version-tolerance path rather than an exact match.
+ * Only an added or removed field is safe under this path; a field whose meaning changed is not
+ * caught here or anywhere else, so this line is the only record that the path was exercised at
+ * all -- worth searching for after any change to what an existing field means.
+ */
+void report_version_tolerance(std::uint32_t documentVersion) noexcept {
+    std::array<char, 96> line{};
+    const int written = std::snprintf(
+        line.data(),
+        line.size(),
+        "ev=state_persistence stage=persist result=tolerated document_version=%u build_version=%u",
+        static_cast<unsigned>(documentVersion),
+        static_cast<unsigned>(kStateVersion));
+    if (written > 0) {
+        core::log::write(core::log::Channel::state,
+                         core::log::Level::info,
+                         {line.data(), static_cast<std::size_t>(written)});
+    }
+}
+
+/**
+ * Notes that `load` recovered from a backup rather than the primary state file.
+ * Loud on purpose: it means state.json itself was unreadable or invalid, and whatever changed in
+ * the session since that backup was taken is gone. The player should be able to tell why their
+ * most recent progress looks missing, not have it happen silently.
+ */
+void report_recovered(const char* source) noexcept {
+    std::array<char, 96> line{};
+    const int written = std::snprintf(
+        line.data(),
+        line.size(),
+        "ev=state_persistence stage=persist result=recovered source=%s",
+        source);
+    if (written > 0) {
+        core::log::write(core::log::Channel::state,
+                         core::log::Level::warn,
+                         {line.data(), static_cast<std::size_t>(written)});
+    }
+}
+
+/** FNV-1a over one document's bytes, folded the same way this codebase already folds it elsewhere. */
+[[nodiscard]] std::uint64_t fnv1a(std::span<const char> data) noexcept {
+    std::uint64_t hash = kHashOffsetBasis;
+    for (const char value : data) {
+        hash ^= static_cast<std::uint8_t>(value);
+        hash *= kHashPrime;
+    }
+    return hash;
+}
+
+/** @return The checksum sidecar path for one source file, or false if the path would not fit. */
+[[nodiscard]] bool checksum_path(const core::path::Buffer& source,
+                                 core::path::Buffer& output) noexcept {
+    output = source;
+    return core::path::append(output, kChecksumSuffix);
+}
+
+/** Best-effort write of one source's checksum sidecar. A failure here never fails the save. */
+void write_checksum(const core::path::Buffer& source, std::span<const char> data) noexcept {
+    core::path::Buffer sumPath{};
+    if (!checksum_path(source, sumPath)) {
+        report_fail("checksum_path");
+        return;
+    }
+    // One extra byte for snprintf's own null terminator; only the leading kChecksumHexDigits of
+    // this are ever written to the sidecar file below.
+    std::array<char, kChecksumHexDigits + 1> scratch{};
+    const int written = std::snprintf(
+        scratch.data(), scratch.size(), "%016llX", static_cast<unsigned long long>(fnv1a(data)));
+    if (written != static_cast<int>(kChecksumHexDigits)) {
+        report_fail("checksum_format");
+        return;
+    }
+    const HANDLE file = CreateFileW(
+        sumPath.chars.data(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        report_fail("checksum_open");
+        return;
+    }
+    DWORD written2 = 0;
+    const bool ok =
+        WriteFile(file, scratch.data(), static_cast<DWORD>(kChecksumHexDigits), &written2, nullptr)
+            != FALSE
+        && written2 == static_cast<DWORD>(kChecksumHexDigits);
+    (void)CloseHandle(file);
+    if (!ok) {
+        report_fail("checksum_write");
+    }
+}
+
+/**
+ * Reads one source's checksum sidecar, when there is one.
+ * A missing or malformed sidecar is not reported and not a failure: every save made before this
+ * feature existed, and every `.bak`/`.bak2` rotated from one, has none, and that is expected.
+ * @return True when a well-formed checksum was found and parsed into `value`.
+ */
+[[nodiscard]] bool read_checksum(const core::path::Buffer& source, std::uint64_t& value) noexcept {
+    core::path::Buffer sumPath{};
+    if (!checksum_path(source, sumPath)) {
+        return false;
+    }
+    const HANDLE file = CreateFileW(
+        sumPath.chars.data(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    std::array<char, kChecksumHexDigits> hex{};
+    DWORD read = 0;
+    const bool ok = ReadFile(file, hex.data(), static_cast<DWORD>(hex.size()), &read, nullptr) != FALSE
+                    && read == static_cast<DWORD>(hex.size());
+    (void)CloseHandle(file);
+    if (!ok) {
+        return false;
+    }
+    value = 0;
+    for (const char digit : hex) {
+        std::uint64_t nibble = 0;
+        if (digit >= '0' && digit <= '9') {
+            nibble = static_cast<std::uint64_t>(digit - '0');
+        } else if (digit >= 'A' && digit <= 'F') {
+            nibble = static_cast<std::uint64_t>(digit - 'A' + 10);
+        } else {
+            return false;
+        }
+        value = (value << 4) | nibble;
+    }
+    return true;
+}
+
+/**
+ * Rotates the two generations of backup one step, using whatever the target still holds from
+ * before this save. Must run before the target is replaced below, or it would only ever copy
+ * the generation about to be written, backing up nothing. Best-effort throughout: every failure
+ * here, including a first-ever save with nothing yet to back up, is logged and left behind, not
+ * propagated -- the primary write is what must succeed, not this. Each file's checksum sidecar
+ * rotates alongside it, so a recovered backup can still be verified the same way the primary is.
+ */
+void rotate_backups() noexcept {
+    core::path::Buffer backupPath = g_path;
+    core::path::Buffer backup2Path = g_path;
+    core::path::Buffer backupSumPath{};
+    core::path::Buffer backup2SumPath{};
+    if (!core::path::append(backupPath, kBackupSuffix)
+        || !core::path::append(backup2Path, kBackup2Suffix)
+        || !checksum_path(backupPath, backupSumPath)
+        || !checksum_path(backup2Path, backup2SumPath)) {
+        report_fail("backup_path");
+        return;
+    }
+    // The older backup steps back one generation first, so it is not clobbered by the one about
+    // to replace it. A missing .bak (fewer than two saves so far) leaves nothing to move.
+    (void)MoveFileExW(backupPath.chars.data(), backup2Path.chars.data(), MOVEFILE_REPLACE_EXISTING);
+    (void)MoveFileExW(
+        backupSumPath.chars.data(), backup2SumPath.chars.data(), MOVEFILE_REPLACE_EXISTING);
+    // The generation this save is about to replace becomes the newest backup. A missing target
+    // (the very first save) leaves nothing to copy, which is expected, not a failure.
+    if (!CopyFileW(g_path.chars.data(), backupPath.chars.data(), FALSE)
+        && GetLastError() != ERROR_FILE_NOT_FOUND) {
+        report_fail("backup");
+    }
+    core::path::Buffer primarySumPath{};
+    if (checksum_path(g_path, primarySumPath)
+        && !CopyFileW(primarySumPath.chars.data(), backupSumPath.chars.data(), FALSE)
+        && GetLastError() != ERROR_FILE_NOT_FOUND) {
+        report_fail("backup_checksum");
+    }
+}
+
+[[nodiscard]] bool write_document(std::span<const char> data) noexcept {
+    if (!g_pathResolved || data.empty()) return false;
+    rotate_backups();
 
     // Stage to .new file, then atomically move over the target.
     core::path::Buffer stagePath = g_path;
@@ -1021,9 +1307,9 @@ void report_fail(const char* reason) noexcept {
     }
 
     DWORD written = 0;
-    const auto size = static_cast<DWORD>(doc.size());
+    const auto size = static_cast<DWORD>(data.size());
     bool complete =
-        WriteFile(file, doc.data(), size, &written, nullptr) != FALSE && written == size;
+        WriteFile(file, data.data(), size, &written, nullptr) != FALSE && written == size;
     complete = CloseHandle(file) != FALSE && complete;
 
     if (complete) {
@@ -1034,37 +1320,187 @@ void report_fail(const char* reason) noexcept {
     if (!complete) {
         (void)DeleteFileW(stagePath.chars.data());
         report_fail("write");
+        return false;
     }
-    return complete;
+    // The primary write is already durable at this point; a checksum sidecar failure is
+    // best-effort like the backup rotation above, not a reason to report the save itself failed.
+    write_checksum(g_path, data);
+    return true;
 }
 
-[[nodiscard]] bool read_document(std::vector<char>& doc) noexcept {
+/**
+ * Reads one source file whole, distinguishing "not there" from an actual failure.
+ * A missing file is the ordinary case for `.bak`/`.bak2` early in an account's life, and for
+ * every source on a brand first boot, so it is not reported. Anything else that stops this from
+ * producing a usable buffer -- an open failure that is not "missing", a size query failure, an
+ * empty file, one too large for `buffer`, or a partial read -- is a real problem and is reported,
+ * so `load` falling through every source never does so with nothing in the log to explain why.
+ */
+[[nodiscard]] bool read_document(const core::path::Buffer& path,
+                                 std::array<char, kFileCapacity>& buffer,
+                                 std::size_t& length) noexcept {
+    length = 0;
     if (!g_pathResolved) return false;
 
-    const HANDLE file = CreateFileW(g_path.chars.data(),
+    const HANDLE file = CreateFileW(path.chars.data(),
                                     GENERIC_READ,
                                     FILE_SHARE_READ,
                                     nullptr,
                                     OPEN_EXISTING,
                                     FILE_ATTRIBUTE_NORMAL,
                                     nullptr);
-    if (file == INVALID_HANDLE_VALUE) return false;
-
-    LARGE_INTEGER fileSize{};
-    if (!GetFileSizeEx(file, &fileSize) || fileSize.QuadPart <= 0
-        || static_cast<std::uint64_t>(fileSize.QuadPart) > kFileCapacity) {
-        CloseHandle(file);
+    if (file == INVALID_HANDLE_VALUE) {
+        if (GetLastError() != ERROR_FILE_NOT_FOUND) {
+            report_fail("open");
+        }
         return false;
     }
 
-    doc.resize(static_cast<std::size_t>(fileSize.QuadPart));
+    LARGE_INTEGER fileSize{};
+    if (!GetFileSizeEx(file, &fileSize)) {
+        CloseHandle(file);
+        report_fail("size");
+        return false;
+    }
+    if (fileSize.QuadPart <= 0) {
+        CloseHandle(file);
+        report_fail("empty");
+        return false;
+    }
+    if (static_cast<std::uint64_t>(fileSize.QuadPart) > buffer.size()) {
+        CloseHandle(file);
+        report_fail("oversized");
+        return false;
+    }
+
     DWORD read = 0;
     const bool ok =
-        ReadFile(file, doc.data(), static_cast<DWORD>(fileSize.QuadPart), &read, nullptr) != FALSE
+        ReadFile(file, buffer.data(), static_cast<DWORD>(fileSize.QuadPart), &read, nullptr)
+            != FALSE
         && read == static_cast<DWORD>(fileSize.QuadPart);
     (void)CloseHandle(file);
     if (!ok) {
-        doc.clear();
+        report_fail("read");
+        return false;
+    }
+    length = static_cast<std::size_t>(fileSize.QuadPart);
+    // A checksum sidecar is optional -- absent for every save made before this feature existed --
+    // so only a sidecar that IS there and does not match is treated as a failure.
+    std::uint64_t expected = 0;
+    if (read_checksum(path, expected) && fnv1a({buffer.data(), length}) != expected) {
+        report_fail("checksum");
+        length = 0;
+        return false;
+    }
+    return true;
+}
+
+/**
+ * The actual synchronous write. Only the flush thread calls this, plus `request_save` itself on
+ * the fallback path where no flush thread is running.
+ */
+[[nodiscard]] FlushResult flush_now() noexcept {
+    // Snapshot the account under the lock, then write outside it.
+    state::AccountState snapshot{};
+    {
+        AcquireSRWLockExclusive(&runtime::storage::g_stateLock);
+        snapshot = runtime::storage::g_state.account;
+        ReleaseSRWLockExclusive(&runtime::storage::g_stateLock);
+    }
+
+    // Heap-allocated: at ~kFileCapacity bytes, this is too large to snapshot safely on a thread
+    // stack, the same reason AccountState itself is heap-allocated at boot.
+    auto doc = std::make_unique<Document>();
+    if (!doc) {
+        report_fail("alloc");
+        // Usually transient: the next tick's allocation attempt costs little and often succeeds
+        // once whatever briefly pressured memory has passed.
+        return FlushResult::transientFailure;
+    }
+    emit_account(*doc, snapshot);
+    if (doc->overflowed) {
+        report_fail("capacity");
+        // Not transient: the account does not fit `kFileCapacity` and retrying will not change
+        // that. `report_capacity_high` below is meant to give warning long before this is ever
+        // reached; reaching it anyway means the budgets need raising, not another attempt.
+        return FlushResult::permanentFailure;
+    }
+    if (doc->size >= kCapacityWarnThreshold) {
+        report_capacity_high(doc->size, kFileCapacity);
+    }
+    return write_document({doc->buf.data(), doc->size}) ? FlushResult::written
+                                                         : FlushResult::transientFailure;
+}
+
+/**
+ * Parses and validates one candidate document against the account it is loading over.
+ * Shared by every source `load` tries -- state.json, then `.bak`, then `.bak2` -- so the exact
+ * same gauntlet runs regardless of which file actually produced the account.
+ * @param text Whole document.
+ * @param authored The account as seeded before any file is read; only its identity and settings
+ * are read here, so a failed earlier attempt cannot leak a partial result into a later one.
+ * @param reason Set to the failed check's name when this returns false, for the caller's log.
+ * @param result Receives the validated account. Untouched on failure.
+ * @return True when the document produced a valid account.
+ */
+[[nodiscard]] bool parse_candidate(std::string_view text,
+                                   const state::AccountState& authored,
+                                   const char*& reason,
+                                   state::AccountState& result) noexcept {
+    StateParser parser(text);
+    state::AccountState parsed{};
+    if (!parser.parse_account(parsed)) {
+        reason = "parse";
+        return false;
+    }
+    // A version newer than this build knows cannot be interpreted safely: that version may have
+    // changed what an existing field means, not only which fields exist. An older or unversioned
+    // file (0 predates versioning) is accepted and runs through the same tolerant field-by-field
+    // parser new fields already use, which is enough for a purely additive or subtractive change.
+    if (parser.documentVersion > kStateVersion) {
+        reason = "version";
+        return false;
+    }
+    if (parser.documentVersion != kStateVersion) {
+        report_version_tolerance(static_cast<std::uint32_t>(parser.documentVersion));
+    }
+    // A save belongs to the account it was written on. Adopting another one's characters and
+    // balances would invent them out of a stale file.
+    if (authored.primarySoid != 0 && parsed.primarySoid != authored.primarySoid) {
+        reason = "identity";
+        return false;
+    }
+    // state.json deliberately carries no AccountSettings: those are configuration, owned by
+    // settings.json. account::valid() requires them, so the authored ones are carried onto the
+    // candidate here -- validating the parsed account on its own would reject every save.
+    parsed.settings = authored.settings;
+    // The authored account is already known good, so a document that cannot produce a valid one
+    // is dropped whole rather than installed and left to fail somewhere further downstream.
+    if (!account::valid(parsed)) {
+        reason = "invalid";
+        return false;
+    }
+    result = parsed;
+    return true;
+}
+
+/**
+ * Reads and validates one source file, reporting why it was rejected when it exists but fails.
+ * A missing file (the common case for `.bak`/`.bak2` early in an account's life, or for every
+ * source on a brand first boot) is not reported: there is nothing wrong with a backup that was
+ * never yet needed.
+ */
+[[nodiscard]] bool load_from(const core::path::Buffer& path,
+                             std::array<char, kFileCapacity>& buffer,
+                             const state::AccountState& authored,
+                             state::AccountState& output) noexcept {
+    std::size_t length = 0;
+    if (!read_document(path, buffer, length)) {
+        return false;
+    }
+    const char* reason = "unknown";
+    if (!parse_candidate(std::string_view(buffer.data(), length), authored, reason, output)) {
+        report_fail(reason);
         return false;
     }
     return true;
@@ -1078,66 +1514,92 @@ bool initialize(void* module) noexcept {
         core::path::artifact_directory(module, g_path) && core::path::append(g_path, kFileSuffix);
     if (!g_pathResolved) {
         report_fail("path");
+        return true;
     }
+    g_wakeEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (g_wakeEvent == nullptr) {
+        report_fail("event");
+        return true; // Persistence still works; request_save falls back to a synchronous write.
+    }
+    g_running.store(true, std::memory_order_release);
+    g_thread = CreateThread(nullptr, 0, &flush_thread, nullptr, 0, nullptr);
+    if (g_thread == nullptr) {
+        report_fail("thread");
+        g_running.store(false, std::memory_order_release);
+        CloseHandle(g_wakeEvent);
+        g_wakeEvent = nullptr;
+        return true;
+    }
+    g_threadReady = true;
     return true;
 }
 
 bool load(state::AccountState& output) noexcept {
-    std::vector<char> doc;
-    if (!read_document(doc)) {
-        // No file or read failure — caller keeps the settings defaults.
+    if (!g_pathResolved) {
+        return true; // Nothing resolved to read from — caller keeps the settings defaults.
+    }
+    auto buffer = std::make_unique<std::array<char, kFileCapacity>>();
+    // Heap-allocated for the same reason `flush_now`'s Document is: a full AccountState is too
+    // large to duplicate onto this thread's stack, which the read buffer above already is too.
+    auto authored = std::make_unique<state::AccountState>(output);
+    if (!buffer || !authored) {
+        report_fail("alloc");
         return true;
     }
 
-    StateParser parser(std::string_view(doc.data(), doc.size()));
-    state::AccountState parsed{};
-    if (!parser.parse_account(parsed)) {
-        report_fail("parse");
-        return true; // Non-fatal: keep settings defaults.
-    }
-    // A version this build does not know is refused rather than migrated, which is the safe
-    // direction: the authored account is already good. 0 is a file written before versioning.
-    if (parser.documentVersion != 0 && parser.documentVersion != kStateVersion) {
-        report_fail("version");
+    if (load_from(g_path, *buffer, *authored, output)) {
         return true;
     }
-    // A save belongs to the account it was written on. Adopting another one's characters and
-    // balances would invent them out of a stale file.
-    if (output.primarySoid != 0 && parsed.primarySoid != output.primarySoid) {
-        report_fail("identity");
+    // state.json was missing, unreadable, or failed validation. Falling straight through to the
+    // seeded defaults here is exactly the failure mode real save-corruption write-ups warn
+    // about: the first mutation after boot would then overwrite `.bak` with that empty account,
+    // and the real save would be gone within a couple of ordinary saves. Trying the backups
+    // first is what a valid `.bak`/`.bak2` exist for.
+    core::path::Buffer backupPath = g_path;
+    if (core::path::append(backupPath, kBackupSuffix)
+        && load_from(backupPath, *buffer, *authored, output)) {
+        report_recovered("bak");
         return true;
     }
-    // state.json deliberately carries no AccountSettings: those are configuration, owned by
-    // settings.json. account::valid() requires them, so the authored ones are carried onto the
-    // candidate here -- validating the parsed account on its own would reject every save.
-    parsed.settings = output.settings;
-    // The authored account is already known good, so a document that cannot produce a valid one
-    // is dropped whole rather than installed and left to fail somewhere further downstream.
-    if (!account::valid(parsed)) {
-        report_fail("invalid");
+    core::path::Buffer backup2Path = g_path;
+    if (core::path::append(backup2Path, kBackup2Suffix)
+        && load_from(backup2Path, *buffer, *authored, output)) {
+        report_recovered("bak2");
         return true;
     }
-    output = parsed;
+    // No candidate produced a valid account. Each attempt already reported why it failed, or
+    // (for a source that was never written yet) reported nothing, which is correct.
     return true;
 }
 
-bool save() noexcept {
-    // Snapshot the account under the lock, then write outside it.
-    state::AccountState snapshot{};
-    {
-        AcquireSRWLockExclusive(&runtime::storage::g_stateLock);
-        snapshot = runtime::storage::g_state.account;
-        ReleaseSRWLockExclusive(&runtime::storage::g_stateLock);
+[[nodiscard]] bool request_save() noexcept {
+    if (!g_pathResolved) return false;
+    if (!g_threadReady) {
+        // No background thread to catch this later, so the write happens now instead of never.
+        return flush_now() == FlushResult::written;
     }
-
-    Document doc{};
-    doc.buf.reserve(kFileCapacity);
-    emit_account(doc, snapshot);
-
-    return write_document(doc.buf);
+    // Only marks the flag. Signalling the event here would wake the thread on every single
+    // mutation, which is a synchronous write moved to another thread, not a coalesced one; the
+    // periodic timeout in flush_thread is what actually picks this up. Only `shutdown` signals
+    // the event, to skip the rest of that wait for its own final flush.
+    g_dirty.store(true, std::memory_order_release);
+    return true;
 }
 
 void shutdown() noexcept {
+    if (g_threadReady) {
+        // Signals the loop in flush_thread to make its exit pass, which flushes first if a
+        // mutation landed between the last periodic flush and this signal.
+        g_running.store(false, std::memory_order_release);
+        SetEvent(g_wakeEvent);
+        WaitForSingleObject(g_thread, INFINITE);
+        CloseHandle(g_thread);
+        CloseHandle(g_wakeEvent);
+        g_thread = nullptr;
+        g_wakeEvent = nullptr;
+        g_threadReady = false;
+    }
+    // With no thread, every request_save already wrote synchronously; nothing is owed here.
     g_path = core::path::Buffer{};
     g_pathResolved = false;
 }

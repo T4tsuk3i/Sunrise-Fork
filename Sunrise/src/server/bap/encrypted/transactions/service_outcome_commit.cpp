@@ -256,7 +256,7 @@ bool commit(ServiceOutcome& outcome, Publication& publication, const char*& reas
                                    : "ev=equip stage=transaction_commit result=fail");
         reason = "equip";
         if (committed) {
-            (void)state::runtime::persistence::save();
+            (void)state::runtime::persistence::request_save();
         }
         if (committed && isSubclassSlot) {
             // Rebuild the ability buckets keyed by the changed subclass.
@@ -273,7 +273,7 @@ bool commit(ServiceOutcome& outcome, Publication& publication, const char*& reas
                            "ev=subclass_select stage=transaction_commit result=fail")) {
             return false;
         }
-        (void)state::runtime::persistence::save();
+        (void)state::runtime::persistence::request_save();
         // Rebuild the ability buckets keyed by the changed selection.
         bap::request_investment_slice();
         return true;
@@ -287,7 +287,7 @@ bool commit(ServiceOutcome& outcome, Publication& publication, const char*& reas
                                    : "ev=acquire stage=transaction_commit result=fail");
         reason = "acquire";
         if (committed) {
-            (void)state::runtime::persistence::save();
+            (void)state::runtime::persistence::request_save();
         }
         return committed;
     }
@@ -300,7 +300,7 @@ bool commit(ServiceOutcome& outcome, Publication& publication, const char*& reas
                                    : "ev=socket_plug stage=transaction_commit result=fail");
         reason = "socket_plug";
         if (committed) {
-            (void)state::runtime::persistence::save();
+            (void)state::runtime::persistence::request_save();
         }
         return committed;
     }
@@ -313,7 +313,7 @@ bool commit(ServiceOutcome& outcome, Publication& publication, const char*& reas
                                    : "ev=item_state stage=transaction_commit result=fail");
         reason = "item_state";
         if (committed) {
-            (void)state::runtime::persistence::save();
+            (void)state::runtime::persistence::request_save();
         }
         return committed;
     }
@@ -325,7 +325,7 @@ bool commit(ServiceOutcome& outcome, Publication& publication, const char*& reas
                                    : "ev=current_activity stage=transaction_commit result=fail");
         reason = "current_activity";
         if (committed) {
-            (void)state::runtime::persistence::save();
+            (void)state::runtime::persistence::request_save();
         }
         return committed;
     }
@@ -338,7 +338,7 @@ bool commit(ServiceOutcome& outcome, Publication& publication, const char*& reas
                                    : "ev=profile_acquire stage=transaction_commit result=fail");
         reason = "profile_acquire";
         if (committed) {
-            (void)state::runtime::persistence::save();
+            (void)state::runtime::persistence::request_save();
         }
         return committed;
     }
@@ -351,7 +351,7 @@ bool commit(ServiceOutcome& outcome, Publication& publication, const char*& reas
                                    : "ev=dismantle stage=transaction_commit result=fail");
         reason = "dismantle";
         if (committed) {
-            (void)state::runtime::persistence::save();
+            (void)state::runtime::persistence::request_save();
         }
         return committed;
     }
@@ -361,7 +361,7 @@ bool commit(ServiceOutcome& outcome, Publication& publication, const char*& reas
                                && report_commit(state::commit_artifact_mod_unlock(*transaction->pending),
                                                 "ev=ws901 stage=transaction_commit result=fail");
         if (committed) {
-            (void)state::runtime::persistence::save();
+            (void)state::runtime::persistence::request_save();
         }
         return committed;
     }
@@ -371,7 +371,7 @@ bool commit(ServiceOutcome& outcome, Publication& publication, const char*& reas
                                && report_commit(state::commit_season_pass_reward(*transaction->pending),
                                                 "ev=ws2400 stage=transaction_commit result=fail");
         if (committed) {
-            (void)state::runtime::persistence::save();
+            (void)state::runtime::persistence::request_save();
         }
         return committed;
     }
@@ -381,7 +381,7 @@ bool commit(ServiceOutcome& outcome, Publication& publication, const char*& reas
                                && report_commit(state::commit_record_reward(*transaction->pending),
                                                 "ev=record_reward stage=transaction_commit result=fail");
         if (committed) {
-            (void)state::runtime::persistence::save();
+            (void)state::runtime::persistence::request_save();
         }
         return committed;
     }
