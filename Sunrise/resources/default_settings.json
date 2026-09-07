@@ -37,7 +37,20 @@
     "socket_menu_routing": false,
     "reveal_lore_books": true,
     "region_private": false,
-    "pin_replicated_record": true
+    "skip_orbit_cinematic_wait": false,
+    "pin_replicated_record": true,
+    "hold_spawn": true,
+    "spawn_hold_ms": 30000,
+    "character_stat_bonus": 0,
+    "character_stat_row": -1,
+    "character_stat_fill_value": 0,
+    "character_stat_fill_first": 0,
+    "character_stat_fill_last": 31,
+    "stat_scan_delay_ms": 0,
+    "stat_scan_window_bytes": 64,
+    "stat_scan_values": [],
+    "character_stat_bonus_rows": [0, 0, 0, 0, 0, 0],
+    "investment_dump": false
   },
   "server": {
     "bap_port": 30974,

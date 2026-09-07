@@ -1,8 +1,10 @@
 #include <Windows.h>
 
+#include "../../../../core/settings/settings.h"
 #include "../../../../core/ui/busy/busy.h"
 #include "../../../targets/game/content.h"
 #include "../../diagnostics/content_readiness_report.h"
+#include "../../diagnostics/investment_dump.h"
 #include "../internal.h"
 #include "../runtime.h"
 #include "../worker.h"
@@ -63,9 +65,11 @@ void service(std::uint64_t nowMilliseconds) noexcept {
 
         lifecycle.complete = sunrise::client::content::investment::refresh();
         sunrise::client::content::diagnostics::report_readiness();
-        sunrise::client::content::diagnostics::dump_investment_tables();
-        sunrise::client::content::diagnostics::dump_armor_sockets();
-        sunrise::client::content::diagnostics::dump_mod_lane_pools_once();
+        if (sunrise::core::settings::get().client.investmentDump) {
+            sunrise::client::content::diagnostics::dump_investment_tables();
+            sunrise::client::content::diagnostics::dump_armor_sockets();
+            sunrise::client::content::diagnostics::dump_mod_lane_pools_once();
+        }
         lifecycle.overlayPending = false;
     });
 }

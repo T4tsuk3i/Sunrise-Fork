@@ -109,6 +109,12 @@ struct Settings {
      * array falls back to `character_stat_bonus` / `character_stat_row`.
      */
     std::array<std::int32_t, kCharacterStatRowCount> characterStatRowBonuses{};
+    /**
+     * Dumps the installed build's bucket, progression and armor-socket tables to the log, once.
+     * Runs on every investment refresh with no gate of its own otherwise, so this exists to keep
+     * it off outside a session that actually wants the dump. Off by default.
+     */
+    bool investmentDump{false};
 };
 
 } // namespace sunrise::core::settings::client

@@ -27,6 +27,7 @@ bool Parser::client_settings(client::Settings& output) noexcept {
     bool hasStatScanWindow = false;
     bool hasStatScanValues = false;
     bool hasCharacterStatRowBonuses = false;
+    bool hasInvestmentDump = false;
     if (consume('}')) {
         return true;
     }
@@ -190,6 +191,11 @@ bool Parser::client_settings(client::Settings& output) noexcept {
                 }
                 hasCharacterStatRowBonuses = true;
             }
+        } else if (key == "investment_dump") {
+            if (hasInvestmentDump || !boolean(candidate.investmentDump)) {
+                return false;
+            }
+            hasInvestmentDump = true;
         } else if (!skip_value(0)) {
             return false;
         }
