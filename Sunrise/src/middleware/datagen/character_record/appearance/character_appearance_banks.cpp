@@ -1,8 +1,11 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <span>
+#include <string_view>
 
 #include "../../../../core/logging/log.h"
+#include "../../../../core/settings/settings.h"
 #include "../../../../state/build_data/runtime.h"
 #include "internal.h"
 
@@ -134,6 +137,168 @@ count_indices_filled(const std::array<std::uint16_t, N>& bank) noexcept {
 /** Diagnostic latch: the appearance block is fixed for one encode, so the first one settles it. */
 std::atomic<bool> g_reportedEncoded{};
 
+/**
+ * Census reports allowed per run.
+ * The census follows gear changes rather than latching once, because an exotic is equipped in the
+ * world long after character select and a one-shot report never sees it. A swap is rare enough
+ * that a small cap covers a session without the encode path being able to flood the log.
+ */
+constexpr std::size_t kMaxCensusReports = 12;
+/** Fingerprint seed and multiplier, the 64-bit FNV-1a pair. */
+constexpr std::uint64_t kFingerprintSeed = 14695981039346656037ULL;
+/** Multiplier paired with the seed above. */
+constexpr std::uint64_t kFingerprintPrime = 1099511628211ULL;
+/** Line buffer for one census row. An item's lanes and their perks are the longest line here. */
+constexpr std::size_t kCensusLineCapacity = 512;
+/** Bytes kept free while appending one ` p=%u` or ` l%zu:%u` token, which cannot exceed this. */
+constexpr std::size_t kCensusTokenReserve = 24;
+/** Perk-bank entries named per line. The character bank is the only one long enough to truncate. */
+constexpr std::size_t kCensusBankEntries = 32;
+
+/**
+ * Appends one definition's sandbox perk indices to a census line.
+ * The bank stores perk definition indices, so these are the exact values `append_perks` would
+ * push: a perk named here and absent from the shipped bank was dropped by a capacity limit.
+ * @param definitionIndex Native item or plug index, or the unavailable sentinel.
+ * @param prefix Token prefix naming the source, `p` for the item itself and `l<lane>` for a plug.
+ * @param lane Lane the plug sits in, ignored when the source is the item itself.
+ * @param line Census line being built.
+ * @param used Bytes already written, advanced per appended token.
+ */
+void append_census_perks(std::uint16_t definitionIndex,
+                         std::string_view prefix,
+                         std::size_t lane,
+                         std::span<char> line,
+                         std::size_t& used) noexcept {
+    details::Definition detail{};
+    if (definitionIndex == details::kUnavailableItemIndex
+        || !state::build_data::find_configured_item_detail(definitionIndex, detail)) {
+        return;
+    }
+    const std::size_t perks = detail.sandboxPerkCount < detail.sandboxPerks.size()
+                                  ? detail.sandboxPerkCount
+                                  : detail.sandboxPerks.size();
+    for (std::size_t entry = 0; entry < perks && used + kCensusTokenReserve < line.size();
+         ++entry) {
+        const int extra = std::snprintf(line.data() + used,
+                                        line.size() - used,
+                                        " %.*s%zu=%u",
+                                        static_cast<int>(prefix.size()),
+                                        prefix.data(),
+                                        lane,
+                                        static_cast<unsigned>(detail.sandboxPerks[entry]));
+        if (extra > 0) {
+            used += static_cast<std::size_t>(extra);
+        }
+    }
+}
+
+/**
+ * Fingerprints the equipped set by definition index and socketed plug.
+ * Equality of this value means the same items carrying the same plugs, which is exactly when a
+ * repeat census would say what the previous one already said.
+ * @param instances Resolved equipped set.
+ * @return Order-dependent digest of the set.
+ */
+[[nodiscard]] std::uint64_t equipped_fingerprint(
+    const family4::loadout::ResolvedInstances& instances) noexcept {
+    std::uint64_t digest = kFingerprintSeed;
+    for (std::size_t index = 0; index < instances.itemCount; ++index) {
+        details::Definition detail{};
+        Equipped equipped{};
+        if (!resolve_equipped(instances.items[index], detail, equipped)) {
+            continue;
+        }
+        digest = (digest ^ equipped.definitionIndex) * kFingerprintPrime;
+        for (std::size_t lane = 0; lane < equipped.laneCount; ++lane) {
+            digest = (digest ^ equipped.plugs[lane]) * kFingerprintPrime;
+        }
+    }
+    return digest;
+}
+
+/** Equipped set the last census described, so an unchanged loadout is not reported twice. */
+std::atomic<std::uint64_t> g_censusFingerprint{};
+/** Censuses emitted so far, against kMaxCensusReports. */
+std::atomic<std::size_t> g_censusReports{};
+
+/**
+ * Reports every sandbox perk each equipped item and plug contributes.
+ * An exotic's effect travels as a sandbox perk on the item or on its intrinsic plug, so this names
+ * the perk indices an equipped exotic actually put into the record. Pairing it with a stopwatch on
+ * the ability is what decides whether the client acts on the perks it is handed.
+ * @param soid Character the record belongs to.
+ * @param instances Resolved equipped set.
+ */
+void report_perk_census(std::uint64_t soid,
+                        const family4::loadout::ResolvedInstances& instances) noexcept {
+    for (std::size_t index = 0; index < instances.itemCount; ++index) {
+        details::Definition detail{};
+        Equipped equipped{};
+        if (!resolve_equipped(instances.items[index], detail, equipped)) {
+            continue;
+        }
+        std::array<char, kCensusLineCapacity> line{};
+        const int header = std::snprintf(line.data(),
+                                         line.size(),
+                                         "ev=perk_census stage=item soid=0x%llX slot=%u def=%u "
+                                         "hash=0x%08X lanes=%zu",
+                                         static_cast<unsigned long long>(soid),
+                                         static_cast<unsigned>(equipped.equipmentSlot),
+                                         static_cast<unsigned>(equipped.definitionIndex),
+                                         detail.definitionHash,
+                                         equipped.laneCount);
+        if (header <= 0) {
+            continue;
+        }
+        auto used = static_cast<std::size_t>(header);
+        append_census_perks(equipped.definitionIndex, "p", 0, line, used);
+        for (std::size_t lane = 0; lane < equipped.laneCount; ++lane) {
+            append_census_perks(equipped.plugs[lane], "l", lane, line, used);
+        }
+        core::log::write(core::log::Channel::middleware, core::log::Level::info, {line.data(), used});
+    }
+}
+
+/**
+ * Reports the leading entries of the shipped character perk bank.
+ * The fill counts alone cannot answer whether one particular perk survived into the record, and
+ * that is the whole question when an exotic is being tested.
+ * @param soid Character the record belongs to.
+ * @param appearance Completed appearance block, all fills applied.
+ */
+void report_perk_bank_entries(std::uint64_t soid,
+                              const layout::Appearance& appearance) noexcept {
+    std::array<char, kCensusLineCapacity> line{};
+    const int header = std::snprintf(line.data(),
+                                     line.size(),
+                                     "ev=perk_census stage=bank soid=0x%llX filled=%zu",
+                                     static_cast<unsigned long long>(soid),
+                                     count_indices_filled(appearance.indexBank));
+    if (header <= 0) {
+        return;
+    }
+    auto used = static_cast<std::size_t>(header);
+    const std::size_t entries = appearance.indexBank.size() < kCensusBankEntries
+                                    ? appearance.indexBank.size()
+                                    : kCensusBankEntries;
+    for (std::size_t entry = 0; entry < entries && used + kCensusTokenReserve < line.size();
+         ++entry) {
+        if (appearance.indexBank[entry] == layout::kEmptyDefinitionIndex) {
+            continue;
+        }
+        const int extra = std::snprintf(line.data() + used,
+                                        line.size() - used,
+                                        " i%zu=%u",
+                                        entry,
+                                        static_cast<unsigned>(appearance.indexBank[entry]));
+        if (extra > 0) {
+            used += static_cast<std::size_t>(extra);
+        }
+    }
+    core::log::write(core::log::Channel::middleware, core::log::Level::info, {line.data(), used});
+}
+
 } // namespace
 
 /**
@@ -142,18 +307,34 @@ std::atomic<bool> g_reportedEncoded{};
  * content: bucket kinds and per-bucket hash counts, the overflow bank's filled count, and how many
  * definition indices each perk bank carries. Together with character_appearance_abilities.cpp's
  * probe this separates "the catalog is empty" from "the record is empty".
+ * @param soid Character the record belongs to, so a three-character encode names its subject.
+ * @param instances Resolved equipped set the banks were filled from, for perk attribution.
  * @param appearance Completed appearance block, all fills applied.
  */
-void report_encoded_probe(std::uint64_t soid, const layout::Appearance& appearance) noexcept {
+void report_encoded_probe(std::uint64_t soid,
+                          const family4::loadout::ResolvedInstances& instances,
+                          const layout::Appearance& appearance) noexcept {
+    // Ahead of the one-shot latch on purpose. The bank and bucket lines describe a record that is
+    // fixed for the run, but an exotic is equipped in the world long after character select, so a
+    // census that latched with them would only ever describe the loadout the player started in.
+    if (core::settings::get().client.perkCensus) {
+        const std::uint64_t fingerprint = equipped_fingerprint(instances);
+        if (g_censusFingerprint.exchange(fingerprint, std::memory_order_relaxed) != fingerprint
+            && g_censusReports.fetch_add(1, std::memory_order_relaxed) < kMaxCensusReports) {
+            report_perk_census(soid, instances);
+            report_perk_bank_entries(soid, appearance);
+        }
+    }
     if (g_reportedEncoded.exchange(true, std::memory_order_relaxed)) {
         return;
     }
     {
         std::array<char, 256> kinds{};
-        int used = std::snprintf(kinds.data(),
-                                 kinds.size(),
-                                 "ev=bank stage=kinds soid=0x%llX",
-                                 static_cast<unsigned long long>(soid));
+        const int header = std::snprintf(kinds.data(),
+                                         kinds.size(),
+                                         "ev=bank stage=kinds soid=0x%llX",
+                                         static_cast<unsigned long long>(soid));
+        auto used = header > 0 ? static_cast<std::size_t>(header) : std::size_t{};
         for (std::size_t bucket = 0;
              bucket < appearance.abilityBuckets.size() && used + 16 < kinds.size();
              ++bucket) {
@@ -167,17 +348,17 @@ void report_encoded_probe(std::uint64_t soid, const layout::Appearance& appearan
             }
         }
         if (used > 0) {
-            core::log::write(core::log::Channel::middleware,
-                             core::log::Level::info,
-                             {kinds.data(), static_cast<std::size_t>(used)});
+            core::log::write(core::log::Channel::middleware, core::log::Level::info,
+                             {kinds.data(), used});
         }
     }
     {
         std::array<char, 384> fills{};
-        int used = std::snprintf(fills.data(),
-                                 fills.size(),
-                                 "ev=bank stage=bucket_fills overflow=%zu",
-                                 count_hashes_filled(appearance.overflowHashes));
+        const int header = std::snprintf(fills.data(),
+                                         fills.size(),
+                                         "ev=bank stage=bucket_fills overflow=%zu",
+                                         count_hashes_filled(appearance.overflowHashes));
+        auto used = header > 0 ? static_cast<std::size_t>(header) : std::size_t{};
         for (std::size_t bucket = 0;
              bucket < appearance.abilityBuckets.size() && used + 16 < fills.size();
              ++bucket) {
@@ -196,7 +377,7 @@ void report_encoded_probe(std::uint64_t soid, const layout::Appearance& appearan
         if (used > 0) {
             core::log::write(core::log::Channel::middleware,
                              core::log::Level::info,
-                             {fills.data(), static_cast<std::size_t>(used)});
+                             {fills.data(), used});
         }
     }
     {

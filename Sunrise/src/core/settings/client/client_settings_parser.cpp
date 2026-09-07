@@ -1,3 +1,5 @@
+#include <limits>
+
 #include "../parser.h"
 
 namespace sunrise::core::settings::parser {
@@ -11,6 +13,12 @@ bool Parser::client_settings(client::Settings& output) noexcept {
     bool hasUserInterface = false;
     bool hasExternalServer = false;
     bool hasFadeRelease = false;
+    bool hasPerkCensus = false;
+    bool hasConstantsDump = false;
+    bool hasSlotSweep = false;
+    bool hasHashSearch = false;
+    bool hasSlotSweepBytes = false;
+    bool hasSlotDumpIndex = false;
     bool hasForceJoinRequestReady = false;
     bool hasRegionPrivate = false;
     bool hasPinReplicatedRecord = false;
@@ -23,6 +31,7 @@ bool Parser::client_settings(client::Settings& output) noexcept {
     bool hasCharacterStatFillLast = false;
     bool hasStatScanDelay = false;
     bool hasStatScanWindow = false;
+    bool hasStatScanInterval = false;
     bool hasStatScanValues = false;
     bool hasCharacterStatRowBonuses = false;
     if (consume('}')) {
@@ -48,6 +57,61 @@ bool Parser::client_settings(client::Settings& output) noexcept {
                 return false;
             }
             hasFadeRelease = true;
+        } else if (key == "perk_census") {
+            if (hasPerkCensus || !boolean(candidate.perkCensus)) {
+                return false;
+            }
+            hasPerkCensus = true;
+        } else if (key == "constants_dump") {
+            if (hasConstantsDump || !boolean(candidate.constantsDump)) {
+                return false;
+            }
+            hasConstantsDump = true;
+        } else if (key == "slot_sweep") {
+            if (hasSlotSweep || !boolean(candidate.slotSweep)) {
+                return false;
+            }
+            hasSlotSweep = true;
+        } else if (key == "hash_search_values") {
+            if (hasHashSearch || !consume('[')) {
+                return false;
+            }
+            candidate.hashSearchCount = 0;
+            if (!consume(']')) {
+                for (;;) {
+                    std::uint64_t value = 0;
+                    if (candidate.hashSearchCount >= candidate.hashSearchValues.size()
+                        || !unsigned_integer(value)
+                        || value > (std::numeric_limits<std::uint32_t>::max)()) {
+                        return false;
+                    }
+                    candidate.hashSearchValues[candidate.hashSearchCount] =
+                        static_cast<std::uint32_t>(value);
+                    ++candidate.hashSearchCount;
+                    if (consume(']')) {
+                        break;
+                    }
+                    if (!consume(',')) {
+                        return false;
+                    }
+                }
+            }
+            hasHashSearch = true;
+        } else if (key == "slot_sweep_bytes") {
+            std::uint64_t value = 0;
+            if (hasSlotSweepBytes || !unsigned_integer(value)
+                || value > client::kMaximumSlotSweepBytes) {
+                return false;
+            }
+            candidate.slotSweepBytes = value;
+            hasSlotSweepBytes = true;
+        } else if (key == "slot_dump_index") {
+            std::int64_t value = 0;
+            if (hasSlotDumpIndex || !signed_integer(value) || value < -1 || value > 255) {
+                return false;
+            }
+            candidate.slotDumpIndex = static_cast<std::int32_t>(value);
+            hasSlotDumpIndex = true;
         } else if (key == "force_join_request_ready") {
             if (hasForceJoinRequestReady || !boolean(candidate.forceJoinRequestReady)) {
                 return false;
@@ -123,6 +187,14 @@ bool Parser::client_settings(client::Settings& output) noexcept {
             }
             candidate.statScanWindowBytes = value;
             hasStatScanWindow = true;
+        } else if (key == "stat_scan_interval_ms") {
+            std::uint64_t value = 0;
+            if (hasStatScanInterval || !unsigned_integer(value)
+                || value > client::kMaximumStatScanIntervalMs) {
+                return false;
+            }
+            candidate.statScanIntervalMs = value;
+            hasStatScanInterval = true;
         } else if (key == "stat_scan_values") {
             if (hasStatScanValues || !consume('[')) {
                 return false;

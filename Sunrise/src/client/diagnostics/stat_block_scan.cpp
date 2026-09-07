@@ -67,6 +67,8 @@ struct Request {
     std::size_t valueCount{};
     std::size_t windowBytes{};
     std::uint32_t delayMilliseconds{};
+    /** Gap before the next pass, or zero to stop after the first one. */
+    std::uint32_t intervalMilliseconds{};
 };
 
 /** Bytes this module occupies, so the scan stops reporting its own settings copy as a find. */
@@ -206,30 +208,41 @@ void report_context(const std::byte* address) noexcept {
 }
 
 /**
- * Dumps the bytes at one code address so it can be disassembled off-process.
+ * Dumps the bytes at one code address so it can be disassembled off-process, and reports whether
+ * the byte at the address itself is a bare unconditional jump.
  * The image is encrypted on disk and plaintext only here, so the bytes have to travel out through
  * the log. A return address points past its call, so the dump starts before it and the instruction
- * that reached the frame sits inside the window rather than off its front edge.
+ * that reached the frame sits inside the window rather than off its front edge. A candidate that
+ * turns out to be a bare `jmp` rather than a call site is most likely a linker thunk or an
+ * obfuscator's redirect stub, and the destination it names is where the real logic sits.
  * @param address Code address recovered from the stack.
  * @param image The executable's loaded range, used to report a stable offset.
+ * @param label Distinguishes this dump's origin in the log line.
+ * @param target Receives the jump's absolute destination when the address holds one.
+ * @return True when a short or near jump sits at the address and named a followable target.
  */
-void report_code_bytes(std::uintptr_t address, const SelfRange& image) noexcept {
+[[nodiscard]] bool report_code_bytes(std::uintptr_t address,
+                                     const SelfRange& image,
+                                     const char* label,
+                                     std::uintptr_t& target) noexcept {
+    target = 0;
     const std::uintptr_t start = address - kCodeLeadBytes;
     MEMORY_BASIC_INFORMATION probe{};
     if (VirtualQuery(reinterpret_cast<const void*>(start), &probe, sizeof probe) == 0
         || !readable(probe.Protect)) {
-        return;
+        return false;
     }
     std::array<std::byte, kCodeDumpBytes> bytes{};
     std::memcpy(bytes.data(), reinterpret_cast<const void*>(start), bytes.size());
     std::array<char, 320> line{};
     const int written = std::snprintf(line.data(),
                                       line.size(),
-                                      "ev=stat_scan stage=code rva=0x%llX lead=%zu b=",
+                                      "ev=stat_scan stage=code label=%s rva=0x%llX lead=%zu b=",
+                                      label,
                                       static_cast<unsigned long long>(start - image.base),
                                       kCodeLeadBytes);
     if (written <= 0) {
-        return;
+        return false;
     }
     auto used = static_cast<std::size_t>(written);
     for (std::size_t index = 0; index < bytes.size() && used + 3 < line.size(); ++index) {
@@ -243,6 +256,23 @@ void report_code_bytes(std::uintptr_t address, const SelfRange& image) noexcept 
         }
     }
     emit({line.data(), used});
+    // The address itself sits kCodeLeadBytes into this window. EB is a short jump (1-byte signed
+    // displacement); E9 is a near jump (4-byte signed displacement). Anything else is not a bare
+    // jump and there is no target to follow.
+    const auto opcode = std::to_integer<unsigned char>(bytes[kCodeLeadBytes]);
+    if (opcode == 0xEBU && kCodeLeadBytes + 1 < bytes.size()) {
+        const auto displacement =
+            static_cast<std::int8_t>(std::to_integer<unsigned char>(bytes[kCodeLeadBytes + 1]));
+        target = address + 2 + static_cast<std::intptr_t>(displacement);
+        return true;
+    }
+    if (opcode == 0xE9U && kCodeLeadBytes + 4 < bytes.size()) {
+        std::int32_t displacement = 0;
+        std::memcpy(&displacement, &bytes[kCodeLeadBytes + 1], sizeof displacement);
+        target = address + 5 + static_cast<std::intptr_t>(displacement);
+        return true;
+    }
+    return false;
 }
 
 /**
@@ -294,7 +324,14 @@ void report_stack_callers(const std::byte* address, const SelfRange& image) noex
         if (written > 0) {
             emit({line.data(), static_cast<std::size_t>(written)});
         }
-        report_code_bytes(candidate, image);
+        std::uintptr_t target = 0;
+        if (report_code_bytes(candidate, image, "stack", target)) {
+            // A bare jump at the candidate itself is not the reading code; it is a stub pointing
+            // at it. One hop is followed, not a chain, so an obfuscator's redirect ladder cannot
+            // turn this into an unbounded walk.
+            std::uintptr_t unused = 0;
+            (void)report_code_bytes(target, image, "jump_target", unused);
+        }
     }
 }
 
@@ -302,7 +339,8 @@ void report_stack_callers(const std::byte* address, const SelfRange& image) noex
 void scan(const Request& request,
           const SelfRange& self,
           const SelfRange& image,
-          const char* form) noexcept {
+          const char* form,
+          std::size_t pass) noexcept {
     static std::array<std::byte, kChunkBytes> chunk{};
     std::size_t hits = 0;
     std::size_t regions = 0;
@@ -350,8 +388,9 @@ void scan(const Request& request,
     std::array<char, 160> line{};
     const int written = std::snprintf(line.data(),
                                       line.size(),
-                                      "ev=stat_scan stage=done form=%s regions=%zu hits=%zu "
-                                      "limit=%zu",
+                                      "ev=stat_scan stage=done pass=%zu form=%s regions=%zu "
+                                      "hits=%zu limit=%zu",
+                                      pass,
                                       form,
                                       regions,
                                       hits,
@@ -363,21 +402,26 @@ void scan(const Request& request,
 
 Request g_request{};
 
-/** Runs one scan guarded, so a region that changes protection mid-read cannot take the process. */
-void guarded_scan() noexcept {
+/**
+ * Runs one scan pass guarded, so a region that changes protection mid-read cannot take the process.
+ * @param pass Ordinal of this pass, stamped on its log lines so a repeating scan's hits can be
+ * told apart by which pass found them.
+ */
+void guarded_scan(std::size_t pass) noexcept {
     const SelfRange self = self_range();
     const SelfRange image = main_module_range();
     std::array<char, 160> banner{};
     const int stamped = std::snprintf(banner.data(),
                                       banner.size(),
-                                      "ev=stat_scan stage=image base=0x%llX size=0x%llX",
+                                      "ev=stat_scan stage=image pass=%zu base=0x%llX size=0x%llX",
+                                      pass,
                                       static_cast<unsigned long long>(image.base),
                                       static_cast<unsigned long long>(image.size));
     if (stamped > 0) {
         emit({banner.data(), static_cast<std::size_t>(stamped)});
     }
     __try {
-        scan(g_request, self, image, "int");
+        scan(g_request, self, image, "int", pass);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         emit("ev=stat_scan stage=done form=int result=fault");
     }
@@ -388,35 +432,53 @@ void guarded_scan() noexcept {
         scalar.values[index] = as_float_bits(scalar.values[index]);
     }
     __try {
-        scan(scalar, self, image, "float");
+        scan(scalar, self, image, "float", pass);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         emit("ev=stat_scan stage=done form=float result=fault");
     }
 }
 
-/** Sleeps out the configured delay, then runs one scan. */
+/**
+ * Sleeps out the configured delay, then runs scan passes until the interval is zero or the pass
+ * cap is reached.
+ * The block a stat sits in is a stable snapshot, but the code that reads it only touches the stack
+ * for the instant an ability computes something from it. A single pass has no way to land on that
+ * instant; repeating the pass across ordinary play does, without requiring the delay to be timed
+ * against a button press. Zero interval keeps the original one-shot behaviour.
+ */
 DWORD WINAPI scan_thread(LPVOID) noexcept {
     Sleep(g_request.delayMilliseconds);
-    std::array<char, 160> line{};
-    const int written = std::snprintf(line.data(),
-                                      line.size(),
-                                      "ev=stat_scan stage=begin values=%zu window=%zu delay_ms=%u",
-                                      g_request.valueCount,
-                                      g_request.windowBytes,
-                                      g_request.delayMilliseconds);
-    if (written > 0) {
-        emit({line.data(), static_cast<std::size_t>(written)});
+    for (std::size_t pass = 0; pass < core::settings::client::kMaximumStatScanPasses; ++pass) {
+        std::array<char, 192> line{};
+        const int written = std::snprintf(line.data(),
+                                          line.size(),
+                                          "ev=stat_scan stage=begin pass=%zu values=%zu window=%zu "
+                                          "delay_ms=%u interval_ms=%u",
+                                          pass,
+                                          g_request.valueCount,
+                                          g_request.windowBytes,
+                                          g_request.delayMilliseconds,
+                                          g_request.intervalMilliseconds);
+        if (written > 0) {
+            emit({line.data(), static_cast<std::size_t>(written)});
+        }
+        guarded_scan(pass);
+        if (g_request.intervalMilliseconds == 0) {
+            break;
+        }
+        Sleep(g_request.intervalMilliseconds);
     }
-    guarded_scan();
     return 0;
 }
 
 } // namespace
 
-/** Schedules the one-shot stat block search when the settings ask for one. */
+/** Schedules the stat block search when the settings name values to look for. */
 bool start_stat_block_scan() noexcept {
     const core::settings::client::Settings& settings = core::settings::get().client;
-    if (settings.statScanDelayMs == 0 || settings.statScanValueCount == 0) {
+    // Whether the scan runs at all is decided by having values to search for. A zero delay is a
+    // real request to start at hook activation, not a way to turn the scan off.
+    if (settings.statScanValueCount == 0) {
         return false;
     }
     g_request = {};
@@ -427,6 +489,7 @@ bool start_stat_block_scan() noexcept {
     }
     g_request.windowBytes = settings.statScanWindowBytes;
     g_request.delayMilliseconds = static_cast<std::uint32_t>(settings.statScanDelayMs);
+    g_request.intervalMilliseconds = static_cast<std::uint32_t>(settings.statScanIntervalMs);
     const HANDLE thread = CreateThread(nullptr, 0, &scan_thread, nullptr, 0, nullptr);
     if (thread == nullptr) {
         emit("ev=stat_scan stage=begin result=thread_fail");

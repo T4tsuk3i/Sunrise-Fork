@@ -2,6 +2,7 @@
 #include <array>
 #include <atomic>
 #include <cstdio>
+#include <string_view>
 
 #include "../../../../core/logging/log.h"
 #include "../../../../core/settings/settings.h"
@@ -164,35 +165,52 @@ std::size_t fill_unnamed_rows(const core::settings::client::Settings& settings,
     return filled;
 }
 
-/** Diagnostic latch: the bonus is fixed for a run, so the first encoded table settles it. */
-std::atomic<bool> g_reportedProbe{};
+/**
+ * Names one character class for a diagnostic line.
+ * A stat only drives an ability the class actually has, so a measurement is meaningless without
+ * knowing whose it is; the class is printed rather than the wire value so a log read weeks later
+ * does not need the enumeration beside it.
+ * @param characterClass Encoded class.
+ * @return Stable lowercase name.
+ */
+[[nodiscard]] constexpr std::string_view class_name(state::CharacterClass characterClass) noexcept {
+    switch (characterClass) {
+        case state::CharacterClass::titan:
+            return "titan";
+        case state::CharacterClass::hunter:
+            return "hunter";
+        case state::CharacterClass::warlock:
+            return "warlock";
+    }
+    return "unknown";
+}
 
 /**
- * Reports the character stat table exactly as it was encoded, once per run.
+ * Reports the character stat table exactly as it was encoded.
  * The sheet clamps what it draws, so a bonus that renders as the native ceiling is ambiguous on
- * its own; this line is the value that was actually asserted, whatever the sheet then shows.
- * @param bonus Configured flat bonus. Zero reports nothing.
+ * its own; this line is the value that was actually asserted, whatever the sheet then shows. It
+ * runs with no bonus configured too, because the baseline the bonus is compared against is
+ * otherwise never written down.
+ * @param soid Character the table belongs to.
+ * @param characterClass That character's class, which decides which stats can be observed at all.
+ * @param bonus Configured flat bonus.
  * @param table Encoded character stat table.
  * @param count Occupied rows.
  */
 void report_probe(std::uint64_t soid,
+                  state::CharacterClass characterClass,
                   std::int32_t bonus,
                   const std::array<layout::StatRow, layout::kStatRowCapacity>& table,
                   std::size_t count) noexcept {
-    const core::settings::client::Settings& tuning = core::settings::get().client;
-    bool hasRowBonuses = false;
-    for (const std::int32_t value : tuning.characterStatRowBonuses) {
-        hasRowBonuses = hasRowBonuses || value != 0;
-    }
-    if ((bonus == 0 && !hasRowBonuses) || g_reportedProbe.exchange(true, std::memory_order_relaxed)) {
-        return;
-    }
+    const std::string_view name = class_name(characterClass);
     std::array<char, 256> line{};
     const int header = std::snprintf(
         line.data(),
         line.size(),
-        "ev=char_stats stage=probe soid=0x%llX bonus=%d rows=%zu",
+        "ev=char_stats stage=probe soid=0x%llX class=%.*s bonus=%d rows=%zu",
         static_cast<unsigned long long>(soid),
+        static_cast<int>(name.size()),
+        name.data(),
         bonus,
         count);
     if (header <= 0) {
@@ -212,22 +230,17 @@ void report_probe(std::uint64_t soid,
     core::log::write(core::log::Channel::server, core::log::Level::info, {line.data(), used});
 }
 
-/** Diagnostic latch: the equipped set is fixed for one encode, so the first one settles it. */
-std::atomic<bool> g_reportedItems{};
-
 /**
- * Reports each equipped item's plugs and its contribution to the six character rows, once.
+ * Reports each equipped item's plugs and its contribution to the six character rows.
  * The sheet's own number cannot be matched to a row without this: it names which row the grenade
  * mods actually feed, and shows whether those plugs are being summed at all.
+ * @param soid Character the equipped set belongs to.
  * @param instances Resolved equipped set.
  * @param rows The six named character stat rows.
  */
 void report_item_stats(std::uint64_t soid,
                        const family4::loadout::ResolvedInstances& instances,
                        const std::array<std::uint8_t, constants::kCharacterStatRowCount>& rows) noexcept {
-    if (g_reportedItems.exchange(true, std::memory_order_relaxed)) {
-        return;
-    }
     for (std::size_t index = 0; index < instances.itemCount; ++index) {
         details::Definition detail{};
         Equipped equipped{};
@@ -293,6 +306,15 @@ void report_item_stats(std::uint64_t soid,
     }
 }
 
+/**
+ * Character the stat diagnostics last described, re-armed whenever the selection moves.
+ * A one-shot latch would report whichever character the run encoded first and stay silent for
+ * every later one, which makes a class swap look like a boot that produced no evidence. Three
+ * classes have three different class abilities, so the stats can only be told apart by moving
+ * between them, and that has to work inside one run.
+ */
+std::atomic<std::uint64_t> g_probedSoid{};
+
 /** Diagnostic latch: the constants are a boot-time domain, so one line settles their absence. */
 std::atomic<bool> g_reportedMissingConstants{};
 
@@ -308,21 +330,19 @@ void report_missing_constants() noexcept {
 
 } // namespace
 
-/** Diagnostic latch: one effective-stat report settles it for a run. */
-std::atomic<bool> g_reportedArmor3{};
-
 /**
- * Reports the centralized Armor 3.0 effective stat table, once per run, under the modern names.
+ * Reports the centralized effective stat table under the modern names.
  * This is the authoritative result of the pipeline; the sheet's legacy-row numbers should match
- * the legacy totals these modern values translated from.
+ * the legacy totals these modern values translated from. Repetition is held off by the caller,
+ * which reports once per selected character rather than once per run.
+ * @param effective Effective value per modern stat.
+ * @param rows The six named character stat rows, ascending.
+ * @param definitions Stat definitions carrying each stat's legacy row and display name.
  */
 void report_armor3_effective(
     const std::array<std::int32_t, armor::stats::kStatCount>& effective,
     const std::array<std::uint8_t, constants::kCharacterStatRowCount>& rows,
     const std::array<armor::stats::Definition, armor::stats::kStatCount>& definitions) noexcept {
-    if (g_reportedArmor3.exchange(true, std::memory_order_relaxed)) {
-        return;
-    }
     std::array<char, 320> line{};
     int header = std::snprintf(line.data(), line.size(), "ev=armor3 stage=effective count=%zu",
                                armor::stats::kStatCount);
@@ -417,8 +437,12 @@ bool apply_stats(const state::CharacterState& character,
     }
     const std::size_t filled = fill_unnamed_rows(tuning, appearance.characterStats, written);
     // Character select encodes every character, so an unqualified latch reports whichever one is
-    // encoded first rather than the one under test. Only the selected character is the subject.
-    if (character.selected) {
+    // encoded first rather than the one under test. Only the selected character is the subject,
+    // and moving the selection re-arms the report so one run can cover all three classes.
+    const bool freshCharacter =
+        character.selected
+        && g_probedSoid.exchange(character.soid, std::memory_order_relaxed) != character.soid;
+    if (freshCharacter) {
         if (filled != 0) {
             std::array<char, 160> line{};
             const int n = std::snprintf(line.data(),
@@ -435,7 +459,11 @@ bool apply_stats(const state::CharacterState& character,
                                  {line.data(), static_cast<std::size_t>(n)});
             }
         }
-        report_probe(character.soid, bonus, appearance.characterStats, written);
+        report_probe(character.soid,
+                     character.characterClass,
+                     bonus,
+                     appearance.characterStats,
+                     written);
         report_armor3_effective(effective, rows, definitions.values);
         report_item_stats(character.soid, instances, rows);
     }

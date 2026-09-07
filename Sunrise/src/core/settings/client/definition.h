@@ -25,8 +25,24 @@ inline constexpr std::uint64_t kMaximumCharacterStatBonus = 1'000;
 
 /** Values one stat-block scan may look for. */
 inline constexpr std::size_t kStatScanValueCapacity = 8;
+/** Hashes the slot sweep may search each table's bytes for. */
+inline constexpr std::size_t kHashSearchCapacity = 8;
+/** Most bytes the slot sweep will hex-dump from one table. */
+inline constexpr std::uint64_t kMaximumSlotSweepBytes = 1024;
 /** Widest window a scan searches for the remaining values, in bytes. */
 inline constexpr std::uint64_t kMaximumStatScanWindow = 4096;
+/**
+ * Longest gap a repeating scan waits between passes, in milliseconds.
+ * A single pass over process memory takes several seconds, so nothing under that is meaningful;
+ * this bound is generous headroom past it, not a tuned floor.
+ */
+inline constexpr std::uint64_t kMaximumStatScanIntervalMs = 60'000;
+/**
+ * Passes a repeating scan runs before it stops, so a forgotten setting cannot scan forever.
+ * At the shortest allowed interval this is several hours of continuous passes, comfortably past
+ * any one play session, so it is a safety ceiling rather than something normal use reaches.
+ */
+inline constexpr std::size_t kMaximumStatScanPasses = 800;
 
 /** Read-only Client settings parsed by Core. */
 struct Settings {
@@ -88,12 +104,23 @@ struct Settings {
     /** Last row the fill covers, bounded by the record's own stat table. */
     std::int32_t characterStatFillLast{31};
     /**
-     * Delay before the one-shot stat-block scan runs, or zero to leave it off.
-     * The scan wants the sandbox live, so it runs long after boot rather than at activation.
+     * Delay before the first stat-block scan pass, zero to start at hook activation.
+     * Whether the scan runs at all is decided by `stat_scan_values` being non-empty, not by this
+     * field: a scan that only starts once the sandbox is already live can miss the window it
+     * exists to catch, so the honest default is to cover the boot from as close to the start as
+     * possible rather than guess how long loading takes.
      */
     std::uint64_t statScanDelayMs{};
     /** Bytes searched for the remaining values once the first one matches. */
     std::uint64_t statScanWindowBytes{64};
+    /**
+     * Gap between scan passes, or zero to run the single configured pass and stop.
+     * The block that carries a stat is one snapshot, but the code that reads it only touches the
+     * stack during the moment an ability computes something from it, and a one-shot scan has no
+     * way to land on that moment. Repeating the pass across ordinary play catches it without
+     * requiring the delay to be timed against a button press.
+     */
+    std::uint64_t statScanIntervalMs{};
     /** Values the scan looks for, in order. */
     std::array<std::int32_t, kStatScanValueCapacity> statScanValues{};
     /** Filled leading entries in `statScanValues`. */
@@ -106,6 +133,55 @@ struct Settings {
      * array falls back to `character_stat_bonus` / `character_stat_row`.
      */
     std::array<std::int32_t, kCharacterStatRowCount> characterStatRowBonuses{};
+    /**
+     * Reports every sandbox perk the equipped set contributes, and the bank the encoder shipped.
+     * An exotic's effect is a sandbox perk carried by the item or one of its plugs, so a perk that
+     * changes nothing in play has two possible causes: the record never carried it, or the client
+     * ignored it. The census separates them, which no in-game observation can. Off by default,
+     * because it prints one line per equipped item on the first encode of every boot.
+     */
+    bool perkCensus{false};
+    /**
+     * Dumps the investment constants bytes around the character stat rows.
+     * Seven scalars are read out of that blob at offsets recovered from the client, and the rest
+     * of it has never been looked at. The six stat rows sit in two separate runs with a gap
+     * between them, which is the same three-and-three split the working and non-working stats
+     * fall into, so what occupies that gap is worth seeing. Off by default; one block per boot.
+     */
+    bool constantsDump{false};
+    /**
+     * Reports every investment root slot, naming the table each one holds.
+     * Eight slots are addressed by name and the rest of the root has never been enumerated, so a
+     * table this build carries is invisible until something asks for it. The stat definition table
+     * is the one being looked for, since nothing else maps a stat row to the identity the client
+     * knows it by. Off by default; it reads every slot's blob, which lengthens one boot.
+     */
+    bool slotSweep{false};
+    /**
+     * Values the slot sweep searches each table's bytes for, as 32-bit little-endian words.
+     * A definition is identified across builds by its hash, and nothing this server extracts
+     * carries one for a stat, so the table holding them can only be found by looking for a hash
+     * whose value is already known. Authored here rather than in source because the values are
+     * game data, and this keeps them in configuration where they belong. Searched only when the
+     * slot sweep runs.
+     */
+    std::array<std::uint32_t, kHashSearchCapacity> hashSearchValues{};
+    /** Filled leading entries in `hashSearchValues`. */
+    std::size_t hashSearchCount{};
+    /**
+     * Leading bytes of each table the slot sweep hex-dumps, or zero to dump none.
+     * The sweep only runs on a boot that re-extracts, which is slow, so this exists to take the
+     * evidence for later analysis while that boot is happening: a table's row stride and the
+     * position of a hash inside a row are both readable from its opening bytes.
+     */
+    std::uint64_t slotSweepBytes{};
+    /**
+     * One slot whose table is dumped in full, or negative for none.
+     * The per-slot byte cap keeps a sweep readable, but a table being studied is wanted whole, and
+     * the sweep only runs on a boot that re-extracts. Naming one slot takes all of it in the same
+     * pass, so the evidence outlives the boot that produced it.
+     */
+    std::int32_t slotDumpIndex{-1};
 };
 
 } // namespace sunrise::core::settings::client

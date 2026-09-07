@@ -3,7 +3,7 @@
 namespace sunrise::client::diagnostics {
 
 /**
- * Starts the one-shot search for the sandbox's own character stat block.
+ * Starts the search for the sandbox's own character stat block.
  *
  * The record Sunrise encodes carries six character stats, and the client's ability code honours
  * three of them: the class ability tracks Recovery exactly while grenade, melee and super compute
@@ -13,7 +13,10 @@ namespace sunrise::client::diagnostics {
  *
  * The scan runs on its own thread after a configured delay, so the player is in a world with the
  * sandbox live rather than on the character select screen, and reads memory without touching a
- * game thread.
+ * game thread. With no repeat interval configured it runs once, which finds the block itself but
+ * only catches the code that reads it if that code happens to be on the stack at that instant.
+ * A configured interval repeats the pass across ordinary play instead, so a hit can be caught
+ * while an ability is actually being used rather than requiring the delay to be timed against it.
  *
  * @return True when the scan was scheduled; false when it is disabled or the thread was refused.
  */

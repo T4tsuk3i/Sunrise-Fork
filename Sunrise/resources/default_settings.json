@@ -31,6 +31,12 @@
       "config_guid": "d2legacy-0000-0000-0000-000000000001"
     },
     "fade_release": true,
+    "perk_census": false,
+    "constants_dump": false,
+    "slot_sweep": false,
+    "hash_search_values": [],
+    "slot_sweep_bytes": 0,
+    "slot_dump_index": -1,
     "force_join_request_ready": true,
     "region_private": false,
     "pin_replicated_record": true,

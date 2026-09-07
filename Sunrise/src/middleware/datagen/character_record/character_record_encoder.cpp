@@ -79,7 +79,7 @@ constexpr std::size_t kPreviewFlagOffsets[]{8, 9};
     // Same subject rule as the other probes: character select encodes all three, and only the
     // selected one is the record under test.
     if (character.selected) {
-        appearance::report_encoded_probe(character.soid, output);
+        appearance::report_encoded_probe(character.soid, instances, output);
     }
     return true;
 }
