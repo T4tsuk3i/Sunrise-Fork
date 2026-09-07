@@ -163,7 +163,7 @@ bool Parser::equipment_item(authored_inventory::Item& output) noexcept {
             std::uint64_t archetype = 0;
             if (!mark(ItemField::armorArchetype)
                 || !unsigned_value(archetype)
-                || archetype > authored_inventory::kArmorArchetypeNone) {
+                || archetype > authored_inventory::kArmorArchetypeMaximum) {
                 return false;
             }
             parsed.armorArchetype = static_cast<std::uint8_t>(archetype);
@@ -171,7 +171,7 @@ bool Parser::equipment_item(authored_inventory::Item& output) noexcept {
             std::uint64_t tier = 0;
             if (!mark(ItemField::armorGearTier)
                 || !unsigned_value(tier)
-                || tier > authored_inventory::kArmorGearTierNone) {
+                || tier > authored_inventory::kArmorGearTierMaximum) {
                 return false;
             }
             parsed.armorGearTier = static_cast<std::uint8_t>(tier);
@@ -179,7 +179,7 @@ bool Parser::equipment_item(authored_inventory::Item& output) noexcept {
             std::uint64_t level = 0;
             if (!mark(ItemField::armorMasterworkLevel)
                 || !unsigned_value(level)
-                || level > authored_inventory::kArmorMasterworkNone) {
+                || level > authored_inventory::kArmorMasterworkMaximum) {
                 return false;
             }
             parsed.armorMasterworkLevel = static_cast<std::uint8_t>(level);

@@ -150,10 +150,11 @@ void report_encoded_probe(std::uint64_t soid, const layout::Appearance& appearan
     }
     {
         std::array<char, 256> kinds{};
-        int used = std::snprintf(kinds.data(),
-                                 kinds.size(),
-                                 "ev=bank stage=kinds soid=0x%llX",
-                                 static_cast<unsigned long long>(soid));
+        const int writtenKinds = std::snprintf(kinds.data(),
+                                               kinds.size(),
+                                               "ev=bank stage=kinds soid=0x%llX",
+                                               static_cast<unsigned long long>(soid));
+        std::size_t used = writtenKinds > 0 ? static_cast<std::size_t>(writtenKinds) : 0;
         for (std::size_t bucket = 0;
              bucket < appearance.abilityBuckets.size() && used + 16 < kinds.size();
              ++bucket) {
@@ -174,10 +175,11 @@ void report_encoded_probe(std::uint64_t soid, const layout::Appearance& appearan
     }
     {
         std::array<char, 384> fills{};
-        int used = std::snprintf(fills.data(),
-                                 fills.size(),
-                                 "ev=bank stage=bucket_fills overflow=%zu",
-                                 count_hashes_filled(appearance.overflowHashes));
+        const int writtenFills = std::snprintf(fills.data(),
+                                               fills.size(),
+                                               "ev=bank stage=bucket_fills overflow=%zu",
+                                               count_hashes_filled(appearance.overflowHashes));
+        std::size_t used = writtenFills > 0 ? static_cast<std::size_t>(writtenFills) : 0;
         for (std::size_t bucket = 0;
              bucket < appearance.abilityBuckets.size() && used + 16 < fills.size();
              ++bucket) {

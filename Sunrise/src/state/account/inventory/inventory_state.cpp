@@ -93,9 +93,10 @@ bool valid(const Sockets& sockets) noexcept {
 /** Checks one whole authored item without reading installed build data. */
 bool valid(const Item& item) noexcept {
     return item.instanceSoid != 0 && item.definitionHash != kNoDefinitionHash && item.level >= 0
-           && item.quantity > 0 && item.mutationSerial >= 0 && item.armorArchetype <= kArmorArchetypeNone
-           && item.armorGearTier <= kArmorGearTierNone && item.armorMasterworkLevel <= kArmorMasterworkNone
-           && valid(item.sockets);
+           && item.quantity > 0 && item.mutationSerial >= 0
+           && item.armorArchetype <= kArmorArchetypeMaximum
+           && item.armorGearTier <= kArmorGearTierMaximum
+           && item.armorMasterworkLevel <= kArmorMasterworkMaximum && valid(item.sockets);
 }
 
 /** Checks every item present in the fixed semantic equipment array. */

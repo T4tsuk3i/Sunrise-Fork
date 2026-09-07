@@ -42,11 +42,13 @@ inline constexpr std::uint32_t kNoDefinitionHash = 0x811C9DC5U;
 /**
  * Authored armor counters keep the State layer free of build-data dependencies.
  * Zero is "unset"; positive values are one-based authoring numbers (archetype 1-6, gear tier 1-5,
- * masterwork 1-5) so an unset item balances a one-based tier without a confusing off-by-one.
+ * masterwork 1-5) so an unset item balances a one-based tier without a confusing off-by-one. Each
+ * constant below is the highest valid one-based number, not a "none" sentinel -- zero already
+ * owns that meaning -- so it names the ceiling a bounds check compares against.
  */
-inline constexpr std::uint8_t kArmorArchetypeNone = 6;
-inline constexpr std::uint8_t kArmorGearTierNone = 5;
-inline constexpr std::uint8_t kArmorMasterworkNone = 5;
+inline constexpr std::uint8_t kArmorArchetypeMaximum = 6;
+inline constexpr std::uint8_t kArmorGearTierMaximum = 5;
+inline constexpr std::uint8_t kArmorMasterworkMaximum = 5;
 
 /** Says whether Middleware uses native socket defaults or authored lanes. */
 enum class SocketPolicy : std::uint8_t {
