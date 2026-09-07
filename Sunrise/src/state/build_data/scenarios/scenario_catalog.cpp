@@ -1,47 +1,22 @@
 #include "scenario_catalog.h"
 
+#include <mutex>
+#include <shared_mutex>
+
 #include "../table.h"
+#include "core/threading/srw_lock.h"
 
 namespace sunrise::state::build_data::scenarios {
 namespace {
 
 // One lock covers both tables: a reader must never see new layouts against old roster groups.
-Lock g_lock;
+core::threading::SrwLock g_lock;
 Table<Definition, kDefinitionCapacity> g_definitions;
 Table<RosterGroup, kRosterGroupCapacity> g_groups;
 
 /** @param definition Candidate row. @return Its name as a bounded view. */
 [[nodiscard]] std::string_view name_of(const Definition& definition) noexcept {
     return {definition.name.data(), definition.nameLength};
-}
-
-/** @param group Candidate roster group. @return True when every field is canonical. */
-[[nodiscard]] bool canonical(const RosterGroup& group) noexcept {
-    if (group.registryKey == 0 || group.slotCount == 0 || group.slotCount > kRosterSlotCapacity) {
-        return false;
-    }
-    for (std::size_t slot = 0; slot < kRosterSlotCapacity; ++slot) {
-        const bool declared = slot < group.slotCount;
-        if (declared
-            && (group.slotTypes[slot] == 0 || group.slotTypes[slot] > kMaximumSlotType
-                || (group.slotFlags[slot] & ~kSlotFlagMask) != 0
-                || group.slotIndices[slot] >= kRosterSlotCapacity)) {
-            return false;
-        }
-        // Indices are the slots' own, so they ascend but may skip. A repeat would seed one object
-        // twice and leave another unseeded, which holds the whole apply back.
-        if (declared && slot != 0 && group.slotIndices[slot] <= group.slotIndices[slot - 1]) {
-            return false;
-        }
-        // Storage past the declared count must stay zero, or two caches of the same packages
-        // could differ byte for byte while meaning the same thing.
-        if (!declared
-            && (group.slotTypes[slot] != 0 || group.slotFlags[slot] != 0
-                || group.slotIndices[slot] != 0)) {
-            return false;
-        }
-    }
-    return true;
 }
 
 /**
@@ -112,7 +87,7 @@ Table<RosterGroup, kRosterGroupCapacity> g_groups;
 
 /** Clears every extracted destination layout and roster group under the catalog lock. */
 void clear() noexcept {
-    const Lock::Exclusive guard(g_lock);
+    const std::lock_guard guard(g_lock);
     g_definitions.clear();
     g_groups.clear();
 }
@@ -123,14 +98,17 @@ bool valid(std::span<const Definition> definitions, std::span<const RosterGroup>
         return false;
     }
     for (std::size_t row = 0; row < groups.size(); ++row) {
-        if (!canonical(groups[row])) {
+        if (!valid_roster_group(groups[row])) {
             return false;
         }
     }
+    bool publishesRoster = definitions.empty();
     for (std::size_t row = 0; row < definitions.size(); ++row) {
         if (!canonical(definitions[row], groups.size())) {
             return false;
         }
+        publishesRoster = publishesRoster || definitions[row].rosterGroupCount != 0
+                          || definitions[row].bubbleGroupCount != 0;
         // A duplicate name would make the destination lookup depend on row order.
         for (std::size_t earlier = 0; earlier < row; ++earlier) {
             if (name_of(definitions[earlier]) == name_of(definitions[row])) {
@@ -138,7 +116,7 @@ bool valid(std::span<const Definition> definitions, std::span<const RosterGroup>
             }
         }
     }
-    return true;
+    return publishesRoster;
 }
 
 /** Replaces the extracted destination layouts and their roster groups in one step. */
@@ -147,7 +125,7 @@ bool replace(std::span<const Definition> definitions,
     if (!valid(definitions, groups)) {
         return false;
     }
-    const Lock::Exclusive guard(g_lock);
+    const std::lock_guard guard(g_lock);
     // Both run, with no short-circuit, so the pair cannot be left half replaced. valid() already
     // checked each against its size, which is the only reason either can refuse.
     const bool storedDefinitions = g_definitions.replace(definitions);
@@ -158,7 +136,7 @@ bool replace(std::span<const Definition> definitions,
 /** Copies one roster group by table index. */
 bool group(std::size_t index, RosterGroup& group) noexcept {
     group = {};
-    const Lock::Shared guard(g_lock);
+    const std::shared_lock guard(g_lock);
     const std::span<const RosterGroup> rows = g_groups.rows();
     const bool present = index < rows.size();
     if (present) {
@@ -169,13 +147,13 @@ bool group(std::size_t index, RosterGroup& group) noexcept {
 
 /** @return Published roster group count. */
 std::size_t group_count() noexcept {
-    const Lock::Shared guard(g_lock);
+    const std::shared_lock guard(g_lock);
     return g_groups.count();
 }
 
 /** Copies every roster group in extraction order. */
 bool snapshot_groups(std::span<RosterGroup> output, std::size_t& count) noexcept {
-    const Lock::Shared guard(g_lock);
+    const std::shared_lock guard(g_lock);
     return g_groups.snapshot(output, count);
 }
 
@@ -185,7 +163,7 @@ bool find(std::string_view name, Definition& definition) noexcept {
     if (name.empty() || name.size() > kNameCapacity) {
         return false;
     }
-    const Lock::Shared guard(g_lock);
+    const std::shared_lock guard(g_lock);
     for (const Definition& row : g_definitions.rows()) {
         if (name_of(row) == name) {
             definition = row;
@@ -197,13 +175,13 @@ bool find(std::string_view name, Definition& definition) noexcept {
 
 /** Copies every row in extraction order. */
 bool snapshot(std::span<Definition> output, std::size_t& count) noexcept {
-    const Lock::Shared guard(g_lock);
+    const std::shared_lock guard(g_lock);
     return g_definitions.snapshot(output, count);
 }
 
 /** @return The number of extracted destination layouts, read under the lock. */
 std::size_t count() noexcept {
-    const Lock::Shared guard(g_lock);
+    const std::shared_lock guard(g_lock);
     return g_definitions.count();
 }
 

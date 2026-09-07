@@ -62,14 +62,8 @@ constexpr std::uint8_t kDismantleClassMaskBits =
     if (state.dismantleRewardCount > state.dismantleRewards.size()) {
         return false;
     }
-    for (std::size_t index = 0; index < state.dismantleRewards.size(); ++index) {
+    for (std::size_t index = 0; index < state.dismantleRewardCount; ++index) {
         const DismantleRewardPolicy& reward = state.dismantleRewards[index];
-        if (index >= state.dismantleRewardCount) {
-            if (!empty_dismantle_reward(reward)) {
-                return false;
-            }
-            continue;
-        }
         if (reward.definitionHash == inventory::kNoDefinitionHash || reward.quantity <= 0
             || (reward.tierMask & ~kDismantleTierMaskBits) != 0
             || (reward.classMask & ~kDismantleClassMaskBits) != 0
@@ -82,18 +76,16 @@ constexpr std::uint8_t kDismantleClassMaskBits =
             }
         }
     }
-    return true;
+    const auto tail =
+        state.dismantleRewards.cbegin() + static_cast<std::ptrdiff_t>(state.dismantleRewardCount);
+    return std::all_of(tail, state.dismantleRewards.cend(), empty_dismantle_reward);
 }
 
-/** Adds one nonzero globally unique key to a bounded identity set. */
+/** Adds one nonzero key to the bounded identity buffer. */
 [[nodiscard]] bool append_identity(std::array<std::uint64_t, kIdentityCapacity>& identities,
                                    std::size_t& count,
                                    std::uint64_t soid) noexcept {
     if (soid == 0 || count >= identities.size()) {
-        return false;
-    }
-    const auto end = identities.cbegin() + static_cast<std::ptrdiff_t>(count);
-    if (std::find(identities.cbegin(), end, soid) != end) {
         return false;
     }
     identities[count++] = soid;
@@ -135,9 +127,9 @@ constexpr std::uint8_t kDismantleClassMaskBits =
     if (!append_identity(identities, identityCount, state.primarySoid)) {
         return report_invalid("primary_soid");
     }
-    for (std::size_t index = 0; index < state.profileItems.size(); ++index) {
+    for (std::size_t index = 0; index < state.profileItemCount; ++index) {
         const inventory::ProfileItem& item = state.profileItems[index];
-        char detail[32]{};
+char detail[32]{};
         std::snprintf(detail, sizeof detail, "index=%zu", index);
         if (index >= state.profileItemCount) {
             if (!empty_profile_item(item)) {
@@ -159,11 +151,16 @@ constexpr std::uint8_t kDismantleClassMaskBits =
             return report_invalid("profile_item_instance_soid_duplicate", detail);
         }
     }
+    const auto profileTail =
+        state.profileItems.cbegin() + static_cast<std::ptrdiff_t>(state.profileItemCount);
+    if (!std::all_of(profileTail, state.profileItems.cend(), empty_profile_item)) {
+        return false;
+    }
 
     bool selected = false;
     for (std::size_t index = 0; index < state.characterCount; ++index) {
         const CharacterState& character = state.characters[index];
-        char detail[32]{};
+char detail[32]{};
         std::snprintf(detail, sizeof detail, "char=%zu", index);
         if (!append_identity(identities, identityCount, character.soid)) {
             return report_invalid("character_soid_duplicate", detail);
@@ -189,6 +186,9 @@ constexpr std::uint8_t kDismantleClassMaskBits =
         if (!inventory::valid(character.inventory)) {
             return report_invalid("character_inventory", detail);
         }
+        if (!inventory::valid(character.stacks)) {
+            return report_invalid("character_stacks", detail);
+        }
         selected = selected || character.selected;
         for (const std::optional<inventory::Item>& item : character.equipment.slots) {
             if (item.has_value()
@@ -204,7 +204,9 @@ constexpr std::uint8_t kDismantleClassMaskBits =
             }
         }
     }
-    return true;
+    auto end = identities.begin() + static_cast<std::ptrdiff_t>(identityCount);
+    std::sort(identities.begin(), end);
+    return std::adjacent_find(identities.begin(), end) == end;
 }
 
 } // namespace

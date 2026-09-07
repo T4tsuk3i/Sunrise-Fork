@@ -1,17 +1,7 @@
 /**
  * Family-two social roster snapshot: the directory and the member record it links to.
- *
- * The Roster and Fireteam panels draw a name and a blank emblem because family two is answered
- * with an empty snapshot. The panel row resolves the emblem with two lookups, not one, and both
- * objects have to be resident at the same time for the pair to resolve:
- *
- *     lookup 1: slot 0, keyed by the account soid, gives the directory
- *     lookup 2: slot 1, keyed by the qword at directory +8, gives the member record
- *     then the emblem definition index is read from member +36, its variant from member +38, and
- *     the light shown as this member's power from member +20 as a 32-bit integer
- *
- * A full snapshot prunes every object it does not name, so publishing one slot per message can
- * never satisfy that chain whichever slot is chosen. Both go out in one message.
+ * The panel resolves the emblem through both objects, and a full snapshot prunes every object it
+ * does not name, so the pair goes out in one message.
  */
 
 #include <algorithm>
@@ -24,7 +14,6 @@
 #include "../../../../../middleware/datagen/definitions.h"
 #include "../../../../../state/account/inventory/inventory_state.h"
 #include "../../../../../state/build_data/items/item_catalog.h"
-#include "../../../../../state/equipment/light/resolution/configured_equipment_light_resolver.h"
 #include "../../../../../state/runtime/runtime.h"
 #include "internal.h"
 #include "snapshot_storage.h"
@@ -40,58 +29,25 @@ constexpr std::size_t kEmblemDefinitionOffset = 36;
 constexpr std::size_t kEmblemVariantOffset = 38;
 
 /**
- * Where the member record carries the light the panel row reads, as a 32-bit integer.
- *
- * Found by probing: every otherwise-unused 2-byte slot in the record was written with its own
- * byte offset as a marker, and the client displayed 1441812 (0x15FFD4) as this member's power --
- * the low half (20) and high half (22) of that value are exactly the markers written at +20 and
- * +22, naming this offset directly rather than requiring one round of guessing per candidate.
- */
-constexpr std::size_t kLightOffset = 20;
-
-/**
- * A missing definition index is every bit set, and the variant is always sent empty.
- *
- * The reader tries the variant first and falls back to the definition index when the variant is
- * the empty sentinel. Sending a real number there resolves art against a bogus variant entry: a
- * light value written to +38 drew a grey placeholder, and a large value stalled the client outright
- * because the field indexes a table.
+ * Absent definition index. The variant field always takes it, because a real value there indexes
+ * a table the client then walks with a bogus entry.
  */
 constexpr std::uint16_t kEmptyDefinitionIndex = 0xFFFFU;
 
 /**
- * Resolves the selected character's equipped emblem to a native definition index, and its
- * equipment light alongside it.
- *
- * This has to track the live loadout rather than publish a constant. The client resolves this
- * account-keyed object as the account's emblem rather than as roster decoration, so a fixed index
- * here pins the emblem globally: character select, inventory and orbit all stop reflecting an equip
- * while the equip itself keeps succeeding. Publishing what the player actually has on makes that
- * harmless. The same is true of light: it is the mean of the eight gear slots, so any of them
- * moving must republish it too.
- *
+ * Resolves the selected character's equipped emblem to a native definition index.
+ * The client reads this object as the account's emblem, so it must track the live loadout.
  * @param account Account snapshot, already read under the lock by the caller.
  * @param index Receives the native definition index of the equipped emblem.
- * @param definitionHash Receives the equipped emblem's own definition hash.
- * @param light Receives the selected character's equipment light. Left at zero when it cannot be
- *              computed, which is the same "nothing to publish" answer the emblem sentinel gives.
- * @return False when nothing is selected, the emblem slot is empty, or the hash is unknown. Every
- *         one of those cases publishes the empty sentinel rather than a guess.
+ * @param definitionHash Receives the equipped emblem hash.
+ * @return False when nothing is selected, the emblem slot is empty, or the hash is unknown.
  */
 [[nodiscard]] bool selected_emblem_definition_index(const state::AccountState& account,
                                                     std::uint16_t& index,
-                                                    std::uint32_t& definitionHash,
-                                                    std::int32_t& light) noexcept {
-    for (std::size_t characterIndex = 0; characterIndex < account.characters.size();
-         ++characterIndex) {
-        const state::CharacterState& character = account.characters[characterIndex];
+                                                    std::uint32_t& definitionHash) noexcept {
+    for (const state::CharacterState& character : account.characters) {
         if (!character.selected) {
             continue;
-        }
-        std::int32_t resolvedLight = 0;
-        if (state::equipment::light::resolution::character_light(
-                account, characterIndex, resolvedLight)) {
-            light = resolvedLight;
         }
         const auto& slot =
             character.equipment
@@ -125,6 +81,7 @@ bool prepare_social_roster(Scratch& scratch,
         return report_failure("social_roster_state");
     }
     const auto destination = std::span(scratch.plaintext).subspan(reservation.rawWriteOffset);
+    // The body is the directory record followed by the member record.
     constexpr std::size_t kTotal = middleware::datagen::kSocialRosterDirectorySize
                                    + middleware::datagen::kSocialRosterMemberSize;
     if (destination.size() < kTotal) {
@@ -133,8 +90,7 @@ bool prepare_social_roster(Scratch& scratch,
 
     std::uint16_t emblem = kEmptyDefinitionIndex;
     std::uint32_t emblemHash = 0;
-    std::int32_t light = 0;
-    if (!selected_emblem_definition_index(account, emblem, emblemHash, light)) {
+    if (!selected_emblem_definition_index(account, emblem, emblemHash)) {
         emblem = kEmptyDefinitionIndex;
     }
 
@@ -145,14 +101,8 @@ bool prepare_social_roster(Scratch& scratch,
 
     /**
      * Writes one object and stages it.
-     *
-     * The two bodies are not interchangeable, because both lookups match on the object's first
-     * qword. The directory leads with the account soid the row searches by and carries the link at
-     * +8; the member record leads with that same link so the second lookup finds it. The account
-     * soid serves as the link because it is already proven to route.
-     *
-     * Only the member record carries the emblem. The directory is read for two flag bits and
-     * nothing else, so a copy of the pair there changes nothing.
+     * Both lookups match on the first qword, so the directory leads with the account soid and
+     * repeats it at +8 as the link the member record leads with. Only the member has the emblem.
      */
     const auto emit = [&](std::size_t size, std::uint32_t id, bool directory) noexcept {
         if (objectCount >= staged.objects.size() || size < kEmblemVariantOffset + sizeof emblem) {
@@ -171,7 +121,6 @@ bool prepare_social_roster(Scratch& scratch,
             std::memcpy(body.data() + kEmblemVariantOffset,
                         &kEmptyDefinitionIndex,
                         sizeof kEmptyDefinitionIndex);
-            std::memcpy(body.data() + kLightOffset, &light, sizeof light);
         }
         std::size_t compressedSize = 0;
         if (!compress_object(scratch,
@@ -220,13 +169,12 @@ bool prepare_social_roster(Scratch& scratch,
     const int written = std::snprintf(line.data(),
                                       line.size(),
                                       "ev=queuez stage=social_roster result=ok soid=0x%016llX"
-                                      " objects=%zu bytes=%zu emblem=%u hash=0x%08X light=%d",
+                                      " objects=%zu bytes=%zu emblem=%u hash=0x%08X",
                                       static_cast<unsigned long long>(account.primarySoid),
                                       objectCount,
                                       rawUsed,
                                       static_cast<unsigned>(emblem),
-                                      static_cast<unsigned>(emblemHash),
-                                      static_cast<int>(light));
+                                      static_cast<unsigned>(emblemHash));
     if (written > 0) {
         core::log::write(core::log::Channel::server,
                          core::log::Level::info,

@@ -89,23 +89,27 @@ read(std::span<const std::byte> blob, std::size_t offset, Value& value) noexcept
 }
 
 /**
- * Reads one array's declared count from a sale row, without resolving its header.
+ * Reads what one sale row charges, from the first row of its price-override array.
+ * A row charging nothing declares no override, which is data rather than a malformed row.
  * @param blob Whole definition blob.
- * @param descriptor Descriptor offset inside the blob.
- * @param count Receives the declared count.
- * @return True when the count is inside the blob and fits the stored width.
+ * @param at Sale row offset inside the blob.
+ * @param value Receives the cost item and quantity, or the absent cost.
+ * @return True when the array is absent, or resolves and ends inside the blob.
  */
 [[nodiscard]] bool
-read_count(std::span<const std::byte> blob, std::size_t descriptor, std::uint32_t& count) noexcept {
-    /** Sale-row array counts are stored as unsigned 32-bit values. */
-    constexpr std::uint64_t kMaximumCount = (std::numeric_limits<std::uint32_t>::max)();
-    count = 0;
-    std::uint64_t declared = 0;
-    if (!read(blob, descriptor, declared) || declared > kMaximumCount) {
+read_sale_cost(std::span<const std::byte> blob, std::size_t at, domain::SaleRow& value) noexcept {
+    value.costItemIndex = domain::kAbsentCostItem;
+    value.costQuantity = 0;
+    ArrayView cost{};
+    if (!read_array(blob, at + kSaleCostArrayDescriptor, domain::kSaleCostRowStride, cost)) {
         return false;
     }
-    count = static_cast<std::uint32_t>(declared);
-    return true;
+    if (cost.count == 0) {
+        return true;
+    }
+    return cost.classId == domain::kSaleCostRowClass
+           && read(blob, cost.base + kSaleCostItemIndexOffset, value.costItemIndex)
+           && read(blob, cost.base + kSaleCostQuantityOffset, value.costQuantity);
 }
 
 /**
@@ -157,20 +161,10 @@ read_index(const reader::Source& source, reader::Scratch& scratch, Storage& stor
         const std::size_t at = definition.saleRowBase + (row * domain::kSaleRowStride);
         domain::SaleRow& value = storage.saleRows[storage.saleRowCount + row];
         value = {};
-        value.vendorIndex = definition.index;
-        value.rowIndex = static_cast<std::uint16_t>(row);
         if (!read(blob, at + kSaleItemIndexOffset, value.itemIndex)
             || !read(blob, at + kSaleSecondaryItemOffset, value.secondaryItemIndex)
             || !read(blob, at + kSaleCategoryIndexOffset, value.categoryIndex)
-            || !read(blob, at + kSaleRaw104Offset, value.raw104)
-            || !read(blob, at + kSaleRaw108Offset, value.raw108)
-            || !read(blob, at + kSaleRaw172Offset, value.raw172)
-            || !read(blob, at + kSaleFeatureBranchOffset, value.featureBranch)
-            || !read_count(blob, at + kSaleExpression8Offset, value.expressionCount8)
-            || !read_count(blob, at + kSaleNestedRecordOffset, value.nestedRecordCount)
-            || !read_count(blob, at + kSaleExpression120Offset, value.expressionCount120)
-            || !read_count(blob, at + kSaleCount136Offset, value.count136)
-            || !read_count(blob, at + kSaleExpression160Offset, value.expressionCount160)) {
+            || !read_sale_cost(blob, at, value)) {
             return false;
         }
     }
@@ -179,7 +173,7 @@ read_index(const reader::Source& source, reader::Scratch& scratch, Storage& stor
 }
 
 /**
- * Reads every installed row of one definition into the flat bank, whole.
+ * Reads the definition hash of every category row of one definition into the flat bank.
  * @param blob Whole definition blob.
  * @param definition Definition whose installed array was already resolved.
  * @param storage Pass storage receiving the rows.
@@ -195,9 +189,7 @@ read_index(const reader::Source& source, reader::Scratch& scratch, Storage& stor
         const std::size_t at = definition.installedRowBase + (row * domain::kInstalledRowStride);
         domain::InstalledRow& value = storage.installedRows[storage.installedRowCount + row];
         value = {};
-        value.vendorIndex = definition.index;
-        value.rowIndex = static_cast<std::uint16_t>(row);
-        if (!read(blob, at, value.raw)) {
+        if (!read(blob, at + kInstalledRowHashOffset, value.definitionHash)) {
             return false;
         }
     }
@@ -251,10 +243,8 @@ read_index(const reader::Source& source, reader::Scratch& scratch, Storage& stor
     definition.thirdCount = third.count;
     definition.saleRowOffset = static_cast<std::uint32_t>(storage.saleRowCount);
     definition.installedRowOffset = static_cast<std::uint32_t>(storage.installedRowCount);
-    // Each row reader advances its bank before the other runs, so a definition whose sale rows fit
-    // but whose installed rows do not would leave orphan sale rows behind; the next definition's
-    // offset then carries the gap and `valid()` rejects the whole set. A skipped definition has to
-    // leave both banks exactly as it found them.
+    // A skipped definition must leave both banks exactly as it found them; an orphan sale row
+    // shifts the next definition's offset and `valid()` then rejects the whole set.
     const std::size_t saleRowsBefore = storage.saleRowCount;
     const std::size_t installedRowsBefore = storage.installedRowCount;
     if (!read(blob, kResetIntervalOffset, definition.resetIntervalRaw)
@@ -268,67 +258,6 @@ read_index(const reader::Source& source, reader::Scratch& scratch, Storage& stor
     storage.definitions[storage.definitionCount] = definition;
     ++storage.definitionCount;
     return true;
-}
-
-/**
- * Chooses which definitions this pass reads.
- *
- * The named hashes come first, each checked against the index just read: a hash the index does
- * not carry is a mistyped rule, and dropping it silently reads exactly like the vendor resolving
- * - until a request against it fails with no line to say the catalog never held it. A hash named
- * twice would spend two of the few definition slots on one vendor. Whatever room is left is
- * filled from the head of the index.
- *
- * @param storage Pass storage holding the index.
- * @param namedHashes Hashes named by the rule file, in priority order.
- * @param hashes Receives the definitions to read.
- * @return How many were chosen.
- */
-[[nodiscard]] std::size_t select_definitions(const Storage& storage,
-                                             std::span<const std::uint32_t> namedHashes,
-                                             std::span<std::uint32_t> hashes) noexcept {
-    std::size_t wanted = 0;
-    for (std::size_t at = 0; at < namedHashes.size() && wanted < hashes.size(); ++at) {
-        bool present = false;
-        for (std::size_t held = 0; held < wanted && !present; ++held) {
-            present = hashes[held] == namedHashes[at];
-        }
-        if (present) {
-            continue;
-        }
-        bool installed = false;
-        for (std::size_t row = 0; row < storage.indexCount && !installed; ++row) {
-            installed = storage.index[row].definitionHash == namedHashes[at];
-        }
-        if (installed) {
-            hashes[wanted++] = namedHashes[at];
-            continue;
-        }
-        core::log::writef(core::log::Channel::state,
-                          core::log::Level::warn,
-                          "ev=vendor stage=catalog result=skip reason=unknown_hash hash=0x%08X",
-                          namedHashes[at]);
-    }
-    for (std::size_t row = 0; row < storage.indexCount && wanted < hashes.size(); ++row) {
-        bool present = false;
-        for (std::size_t at = 0; at < wanted && !present; ++at) {
-            present = hashes[at] == storage.index[row].definitionHash;
-        }
-        if (!present) {
-            hashes[wanted++] = storage.index[row].definitionHash;
-        }
-    }
-    return wanted;
-}
-
-/** @param hashes Requested hashes. @param hash Index row hash. @return True when requested. */
-[[nodiscard]] bool requested(std::span<const std::uint32_t> hashes, std::uint32_t hash) noexcept {
-    for (const std::uint32_t value : hashes) {
-        if (value == hash) {
-            return true;
-        }
-    }
-    return false;
 }
 
 /**
@@ -360,9 +289,7 @@ void report(const Storage& storage, std::size_t skipped, const char* result) noe
 } // namespace
 
 /** Extracts and publishes the vendor catalog from the installed packages. */
-bool build(const reader::Source& source,
-           reader::Scratch& scratch,
-           std::span<const std::uint32_t> namedHashes) noexcept {
+bool build(const reader::Source& source, reader::Scratch& scratch) noexcept {
     if (state::build_data::vendor_catalog_ready()) {
         return true;
     }
@@ -372,21 +299,11 @@ bool build(const reader::Source& source,
         report(storage, 0, "index");
         return false;
     }
-    static std::array<std::uint32_t, domain::kDefinitionCapacity> chosen{};
-    const std::span<const std::uint32_t> definitionHashes =
-        std::span(chosen).first(select_definitions(storage, namedHashes, chosen));
-    // Walking the index in order gives the ascending definition order the catalog requires.
-    //
-    // A definition that cannot be read - or cannot fit the definition or row banks - costs that
-    // vendor alone, not the pass. Failing whole here is what a full bank used to do, and it was
-    // the worst failure this domain had: the empty catalog was cached, every later boot restored
-    // it, and every vendor stayed unresolvable with one boot-time line to say why.
+    // Walk the index in order: the catalog requires ascending definition order. A definition that
+    // will not read or will not fit costs that vendor alone, never the whole pass.
     std::size_t skipped = 0;
     for (std::size_t row = 0; row < storage.indexCount; ++row) {
         const domain::IndexEntry entry = storage.index[row];
-        if (!requested(definitionHashes, entry.definitionHash)) {
-            continue;
-        }
         if (read_definition(source, scratch, entry, storage)) {
             continue;
         }
@@ -406,13 +323,6 @@ bool build(const reader::Source& source,
         std::span(storage.saleRows).first(storage.saleRowCount),
         std::span(storage.installedRows).first(storage.installedRowCount));
     report(storage, skipped, published ? "ok" : "publish");
-    core::log::writef(core::log::Channel::state,
-                      published ? core::log::Level::info : core::log::Level::warn,
-                      "ev=vendor stage=catalog result=%s named=%zu requested=%zu index_rows=%zu",
-                      published ? "ok" : "fail",
-                      namedHashes.size(),
-                      definitionHashes.size(),
-                      storage.indexCount);
     return published;
 }
 

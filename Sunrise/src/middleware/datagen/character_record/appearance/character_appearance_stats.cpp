@@ -7,6 +7,8 @@
 #include "../../../../core/settings/settings.h"
 #include "../../../../state/build_data/armor/stats/definition.h"
 #include "../../../../state/build_data/runtime.h"
+#include "../../../../state/equipment/light/definition.h"
+#include "../../../../state/runtime/runtime.h"
 #include "internal.h"
 
 namespace sunrise::middleware::datagen::character_record::appearance {
@@ -50,7 +52,7 @@ namespace armor = state::build_data::armor;
 [[nodiscard]] std::int32_t item_total(const Equipped& equipped, std::uint8_t row) noexcept {
     std::int32_t total = definition_total(equipped.definitionIndex, row);
     for (std::size_t lane = 0; lane < equipped.laneCount; ++lane) {
-        total += definition_total(equipped.plugs[lane], row);
+        total += definition_total(resolve_effective_plug(equipped, lane), row);
     }
     return total;
 }
@@ -59,14 +61,14 @@ namespace armor = state::build_data::armor;
  * Collects every stat row one equipped item or its plugs declare.
  * @param equipped Effective plug lanes.
  * @param count Occupied entries, advanced per distinct row.
+ * @return False for an invalid stat row or insufficient storage.
  */
-void collect_rows(const Equipped& equipped,
-                  std::span<std::uint8_t> rows,
-                  std::size_t& count) noexcept {
+[[nodiscard]] bool
+collect_rows(const Equipped& equipped, std::span<std::uint8_t> rows, std::size_t& count) noexcept {
     const std::size_t lanes = equipped.laneCount + 1;
     for (std::size_t source = 0; source < lanes; ++source) {
         const std::uint16_t definitionIndex =
-            source == 0 ? equipped.definitionIndex : equipped.plugs[source - 1];
+            source == 0 ? equipped.definitionIndex : resolve_effective_plug(equipped, source - 1);
         details::Definition detail{};
         if (definitionIndex == details::kUnavailableItemIndex
             || !state::build_data::find_configured_item_detail(definitionIndex, detail)) {
@@ -74,15 +76,24 @@ void collect_rows(const Equipped& equipped,
         }
         const std::size_t stats =
             detail.statCount < detail.stats.size() ? detail.statCount : detail.stats.size();
-        for (std::size_t entry = 0; entry < stats && count < rows.size(); ++entry) {
+        for (std::size_t entry = 0; entry < stats; ++entry) {
             const std::uint8_t row = detail.stats[entry].row;
-            if (row != details::kEmptyStatRow
-                && std::find(rows.begin(), rows.begin() + static_cast<std::ptrdiff_t>(count), row)
-                       == rows.begin() + static_cast<std::ptrdiff_t>(count)) {
+            if (row == details::kEmptyStatRow) {
+                continue;
+            }
+            if (row >= constants::kStatRowCount) {
+                return false;
+            }
+            if (std::find(rows.begin(), rows.begin() + static_cast<std::ptrdiff_t>(count), row)
+                == rows.begin() + static_cast<std::ptrdiff_t>(count)) {
+                if (count >= rows.size()) {
+                    return false;
+                }
                 rows[count++] = row;
             }
         }
     }
+    return true;
 }
 
 /**
@@ -105,21 +116,30 @@ void append(std::uint8_t row,
     ++count;
 }
 
-/**
- * Fills one per-weapon table with every row that weapon and its plugs declare, ascending.
- * @param equipped Effective plug lanes of one weapon.
- * @param table Per-weapon stat table.
- */
-void apply_weapon_table(const Equipped& equipped,
-                        std::array<layout::StatRow, layout::kStatRowCapacity>& table) noexcept {
-    std::array<std::uint8_t, layout::kStatRowCapacity> rows{};
-    std::size_t rowCount = 0;
-    collect_rows(equipped, rows, rowCount);
+/** Writes item Power and definition stats, rejecting invalid rows or insufficient space. */
+[[nodiscard]] bool
+apply_weapon_table(const Equipped& equipped,
+                   std::uint8_t powerRow,
+                   std::int32_t power,
+                   std::array<layout::StatRow, layout::kStatRowCapacity>& table) noexcept {
+    std::array<std::uint8_t, constants::kStatRowCount> rows{powerRow};
+    std::size_t rowCount = 1;
+    if (!collect_rows(equipped, rows, rowCount)) {
+        return false;
+    }
     std::sort(rows.begin(), rows.begin() + static_cast<std::ptrdiff_t>(rowCount));
+    std::array<layout::StatRow, layout::kStatRowCapacity> staged{};
     std::size_t written = 0;
     for (std::size_t entry = 0; entry < rowCount; ++entry) {
-        append(rows[entry], item_total(equipped, rows[entry]), table, written);
+        const std::uint8_t row = rows[entry];
+        const std::int32_t value = row == powerRow ? power : item_total(equipped, row);
+        if (value > 0 && written >= staged.size()) {
+            return false;
+        }
+        append(row, value, staged, written);
     }
+    table = staged;
+    return true;
 }
 
 /** @param table Encoded rows. @param count Occupied rows. @return True when the row is written. */
@@ -296,14 +316,14 @@ void report_item_stats(std::uint64_t soid,
 /** Diagnostic latch: the constants are a boot-time domain, so one line settles their absence. */
 std::atomic<bool> g_reportedMissingConstants{};
 
-/** Reports once that the installed investment constants are not published. */
+/** Reports once that the installed investment constants are unavailable or invalid. */
 void report_missing_constants() noexcept {
     if (g_reportedMissingConstants.exchange(true, std::memory_order_relaxed)) {
         return;
     }
     core::log::write(core::log::Channel::server,
                      core::log::Level::warn,
-                     "ev=char_stats stage=constants result=absent");
+                     "ev=char_stats stage=constants result=unavailable_or_invalid");
 }
 
 } // namespace
@@ -354,9 +374,8 @@ bool apply_stats(const state::CharacterState& character,
                  std::int32_t light,
                  layout::Appearance& appearance) noexcept {
     constants::InvestmentConstants named{};
-    if (!state::build_data::find_investment_constants(named)) {
-        // Without the named rows there is no light row either, so the record cannot be built at
-        // all. Report it once: the alternative is a silently empty stat table.
+    if (!state::build_data::find_investment_constants(named) || !constants::valid(named)) {
+        // Publishing an absent or unusable weapon Power row silently selects the damage floor.
         report_missing_constants();
         return false;
     }
@@ -377,6 +396,23 @@ bool apply_stats(const state::CharacterState& character,
     std::array<std::int32_t, armor::stats::kStatCount> effective{};
     std::size_t written = 0;
     append(named.lightStatRow, light, appearance.characterStats, written);
+
+    // The seasonal Artifact contributes its stat row on top of the equipment, before the six
+    // armour rows resolve their own totals.
+    for (std::size_t index = 0; index < instances.itemCount; ++index) {
+        details::Definition detail{};
+        Equipped equipped{};
+        if (!resolve_equipped(instances.items[index], detail, equipped)
+            || detail.definitionHash != state::kSeasonalArtifactItemHash || detail.statCount == 0
+            || detail.stats.front().row == details::kEmptyStatRow) {
+            continue;
+        }
+        append(detail.stats.front().row,
+               state::artifact_power_bonus(),
+               appearance.characterStats,
+               written);
+        break;
+    }
 
     std::size_t rowIndex = 0;
     for (const std::uint8_t row : rows) {
@@ -448,8 +484,12 @@ bool apply_stats(const state::CharacterState& character,
         }
         details::Definition detail{};
         Equipped equipped{};
-        if (resolve_equipped(instances.items[index], detail, equipped)) {
-            apply_weapon_table(equipped, appearance.weaponStats[weapon]);
+        std::int32_t power = 0;
+        if (!resolve_equipped(instances.items[index], detail, equipped)
+            || !state::equipment::light::item_power(instances.items[index].instance.level, power)
+            || !apply_weapon_table(
+                equipped, named.weaponPowerStatRow, power, appearance.weaponStats[weapon])) {
+            return false;
         }
     }
     return true;

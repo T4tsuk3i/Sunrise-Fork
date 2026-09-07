@@ -52,23 +52,49 @@ struct RosterStorage {
     std::size_t slotCount{};
     /** Set when the object declared more descriptors than storage holds, which refuses it. */
     bool slotsOverflowed{};
-    /** Group objects whose descriptor walk yielded no publishable slot. */
+    /** Group objects whose complete descriptor walk could not be proved or yielded no slot. */
     std::size_t unresolvedGroups{};
     /** Destinations walked so far. The walk resumes here on the next call. */
     std::size_t cursor{};
     /** Tag reads spent in the current call, which is what bounds how long it blocks. */
     std::size_t reads{};
+    /**
+     * Destination whose scenario is being walked, for diagnostics only.
+     * Several scenarios share one map and walk the same bubbles, so a per-object trace without
+     * this cannot say which destination reached an object and is easy to misread.
+     */
+    std::uint32_t destinationTag{};
+    /**
+     * Why the descriptor walk of the object being resolved fell short, counted per exit.
+     * Cleared with the slot list, so every count belongs to one object.
+     */
+    struct WalkExits {
+        /** Handles enumerated across the object's per-bubble sub-blocks. */
+        std::size_t handles{};
+        /** Descriptor blobs reached, which is where a slot can still be recorded. */
+        std::size_t blobs{};
+        /** A bubble entry did not decode, which abandons every bubble after it. */
+        std::size_t bubbleAborts{};
+        /** A placed handle did not decode, which abandons the rest of the walk. */
+        std::size_t handleAborts{};
+        /** One handle's chain reached a tag that would not read. */
+        std::size_t readFailures{};
+        /** One handle's chain reached a class with no next tag. */
+        std::size_t chainEnds{};
+        /** One handle's chain was still unresolved at the depth limit. */
+        std::size_t depthExhausted{};
+    };
+    WalkExits exits{};
 };
 
 /** Tag-read budget bounds one process-freeze interval and keeps worker shutdown responsive. */
 inline constexpr std::size_t kRosterReadBudget = 150;
 
-/** Live scenario tags found by the class sweep. The measured live count is 468. */
+/** Live scenario tags found by the class sweep. The live count is 468. */
 inline constexpr std::size_t kLiveTagCapacity = 1'024;
 /**
  * How long the collection keeps retrying the destinations that have not read yet.
- * Packages register during the boot, so an early attempt reads fewer of them. One run latched at
- * 417 of 466 and the destination it dropped was the Tower.
+ * Packages register during the boot, so an early attempt reads fewer of them.
  */
 inline constexpr std::uint64_t kResolveWindowMs = 15'000;
 /** Tag reads one collection call may spend, for the same reason the roster walk is bounded. */
@@ -176,11 +202,11 @@ void record_slot(RosterStorage& storage,
 /**
  * Fills one candidate group from the descriptors the walk found, in slot-index order.
  * One slot is one descriptor, indexed by the descriptor rather than by its position.
- * A group short of one descriptor is dropped, never published short.
+ * Declared slots with no descriptor are omitted only after the package walk completed.
  * @param storage Working storage holding the descriptors.
  * @param declaredSlotCount Slots the object's own slot array declares.
  * @param group Receives the slot types, flags and indices.
- * @return True when every declared slot has a descriptor and nothing overflowed.
+ * @return True when the nonempty descriptor subset is unique, in range, and did not overflow.
  */
 [[nodiscard]] bool fill_slots(RosterStorage& storage,
                               std::size_t declaredSlotCount,
@@ -246,6 +272,7 @@ void publish_groups(Walk& walk, layouts::Definition& row) noexcept;
                                   reader::Scratch& scratch,
                                   RosterStorage& storage,
                                   std::uint32_t objectTag,
+                                  std::uint32_t sliceSetIndex,
                                   std::uint16_t& group) noexcept;
 
 /**

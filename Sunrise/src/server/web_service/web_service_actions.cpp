@@ -17,6 +17,7 @@
 #include "../../middleware/web_service/messages/opcode403.h"
 #include "../../middleware/web_service/messages/opcode406.h"
 #include "../../middleware/web_service/messages/opcode504.h"
+#include "../../middleware/web_service/messages/opcode701/opcode701_codec.h"
 #include "../../middleware/web_service/messages/opcode801.h"
 #include "../../middleware/web_service/messages/opcode901/opcode901_codec.h"
 #include "../../middleware/web_service/messages/opcode903.h"
@@ -29,6 +30,7 @@
 #include "../../state/build_data/vendors/vendor_catalog.h"
 #include "../../state/runtime/runtime.h"
 #include "../../state/vendors/answered_interactions.h"
+#include "internal_actions.h"
 
 namespace sunrise::server::web_service {
 
@@ -59,165 +61,54 @@ std::array<char, core::rule_text::kRuleTextCapacity> g_ruleText{};
 
 } // namespace
 
-/** Logs one exact correlated equipment response after its Queuez update is staged. */
-void report_equip_response(const middleware::web_service::Message& message,
-                           std::int32_t family4Version,
-                           std::span<const std::byte> response) noexcept {
-    std::array<char, core::log::kLineCapacity> line{};
-    const int prefix = std::snprintf(line.data(),
-                                     line.size(),
-                                     "ev=equipment stage=response opcode=%u transaction=%u "
-                                     "family_version=%d bytes=%zu hex=",
-                                     static_cast<unsigned>(message.opcode),
-                                     static_cast<unsigned>(message.transactionId),
-                                     family4Version,
-                                     response.size());
-    if (prefix <= 0 || static_cast<std::size_t>(prefix) >= line.size()) {
-        return;
-    }
-    std::size_t length = static_cast<std::size_t>(prefix);
-    (void)core::log::append_hex(line, length, response);
-    core::log::write(core::log::Channel::server, core::log::Level::debug, {line.data(), length});
-}
+/** Decodes and prepares one sparse account-settings writeback without publishing State. */
+state::SettingsUpdateDisposition mutate_settings(const middleware::web_service::Message& message,
+                                                 Outcome& outcome) noexcept {
+    namespace opcode701 = middleware::web_service::messages::opcode701;
 
-/** Logs the final item-creation status pair and the exact Family-4 revision it promises. */
-void report_item_acquisition_response(const middleware::web_service::Message& message,
-                                      std::int32_t family4Version,
-                                      std::uint64_t acquiredInstanceSoid,
-                                      std::span<const std::byte> response) noexcept {
-    std::array<char, core::log::kLineCapacity> line{};
-    const int prefix = std::snprintf(
-        line.data(),
-        line.size(),
-        "ev=acquire stage=response result=ok opcode=%u transaction=%u family_version=%d "
-        "instance=0x%llX bytes=%zu hex=",
-        static_cast<unsigned>(message.opcode),
-        static_cast<unsigned>(message.transactionId),
-        family4Version,
-        static_cast<unsigned long long>(acquiredInstanceSoid),
-        response.size());
-    if (prefix <= 0 || static_cast<std::size_t>(prefix) >= line.size()) {
-        return;
+    opcode701::Request request{};
+    if (!opcode701::parse_request(message, request)) {
+        core::log::write(core::log::Channel::server,
+                         core::log::Level::warn,
+                         "ev=ws701 stage=prepare result=rejected reason=parse");
+        return state::SettingsUpdateDisposition::rejected;
     }
-    std::size_t length = static_cast<std::size_t>(prefix);
-    (void)core::log::append_hex(line, length, response);
-    core::log::write(core::log::Channel::server, core::log::Level::debug, {line.data(), length});
-}
 
-/** Logs the final profile-stack status pair and the exact Family-4 account revision it promises. */
-void report_profile_item_acquisition_response(const middleware::web_service::Message& message,
-                                              std::int32_t family4Version,
-                                              std::uint32_t definitionHash,
-                                              std::int32_t quantity,
-                                              std::span<const std::byte> response) noexcept {
-    std::array<char, core::log::kLineCapacity> line{};
-    const int prefix =
-        std::snprintf(line.data(),
-                      line.size(),
-                      "ev=profile_acquire stage=response result=ok opcode=%u transaction=%u "
-                      "family_version=%d definition_hash=0x%08X quantity=%d bytes=%zu hex=",
-                      static_cast<unsigned>(message.opcode),
-                      static_cast<unsigned>(message.transactionId),
-                      family4Version,
-                      definitionHash,
-                      quantity,
-                      response.size());
-    if (prefix <= 0 || static_cast<std::size_t>(prefix) >= line.size()) {
-        return;
-    }
-    std::size_t length = static_cast<std::size_t>(prefix);
-    (void)core::log::append_hex(line, length, response);
-    core::log::write(core::log::Channel::server, core::log::Level::debug, {line.data(), length});
-}
-
-/** Logs the final dismantle status pair and the exact Family-4 revision it promises. */
-void report_item_dismantle_response(const middleware::web_service::Message& message,
-                                    std::int32_t family4Version,
-                                    std::uint64_t dismantledInstanceSoid,
-                                    std::span<const std::byte> response) noexcept {
-    std::array<char, core::log::kLineCapacity> line{};
-    const int prefix = std::snprintf(
-        line.data(),
-        line.size(),
-        "ev=dismantle stage=response result=ok opcode=%u transaction=%u family_version=%d "
-        "instance=0x%llX bytes=%zu hex=",
-        static_cast<unsigned>(message.opcode),
-        static_cast<unsigned>(message.transactionId),
-        family4Version,
-        static_cast<unsigned long long>(dismantledInstanceSoid),
-        response.size());
-    if (prefix <= 0 || static_cast<std::size_t>(prefix) >= line.size()) {
-        return;
-    }
-    std::size_t length = static_cast<std::size_t>(prefix);
-    (void)core::log::append_hex(line, length, response);
-    core::log::write(core::log::Channel::server, core::log::Level::debug, {line.data(), length});
-}
-
-/** Logs the exact opcode-903 status pair and the item-instance revision it promises. */
-void report_socket_plug_response(const middleware::web_service::Message& message,
-                                 std::int32_t family4Version,
-                                 std::uint64_t targetInstanceSoid,
-                                 std::uint8_t socketLane,
-                                 std::uint16_t plugDefinitionIndex,
-                                 std::span<const std::byte> response) noexcept {
-    std::array<char, core::log::kLineCapacity> line{};
-    const int prefix = std::snprintf(
-        line.data(),
-        line.size(),
-        "ev=socket_plug stage=response result=ok opcode=%u transaction=%u family_version=%d "
-        "instance=0x%llX lane=%u plug_definition=%u bytes=%zu hex=",
-        static_cast<unsigned>(message.opcode),
-        static_cast<unsigned>(message.transactionId),
-        family4Version,
-        static_cast<unsigned long long>(targetInstanceSoid),
-        static_cast<unsigned>(socketLane),
-        static_cast<unsigned>(plugDefinitionIndex),
-        response.size());
-    if (prefix <= 0 || static_cast<std::size_t>(prefix) >= line.size()) {
-        return;
-    }
-    std::size_t length = static_cast<std::size_t>(prefix);
-    (void)core::log::append_hex(line, length, response);
-    core::log::write(core::log::Channel::server, core::log::Level::debug, {line.data(), length});
-}
-
-/** Logs the exact opcode-801 status pair and subclass item revision it promises. */
-void report_subclass_selection_response(const middleware::web_service::Message& message,
-                                        std::int32_t family4Version,
-                                        const state::PendingSubclassSelection& mutation,
-                                        std::span<const std::byte> response) noexcept {
-    std::array<char, core::log::kLineCapacity> line{};
-    const int prefix =
-        std::snprintf(line.data(),
-                      line.size(),
-                      "ev=subclass_select stage=response result=ok opcode=%u transaction=%u "
-                      "family_version=%d instance=0x%llX entry=%u bytes=%zu hex=",
-                      static_cast<unsigned>(message.opcode),
-                      static_cast<unsigned>(message.transactionId),
-                      family4Version,
-                      static_cast<unsigned long long>(mutation.subclassInstanceSoid),
-                      static_cast<unsigned>(mutation.requestedEntry),
-                      response.size());
-    if (prefix <= 0 || static_cast<std::size_t>(prefix) >= line.size()) {
-        return;
-    }
-    // Upper-case hex, which is the form the rest of the log lines use.
-    constexpr char kHex[] = "0123456789ABCDEF";
-    std::size_t length = static_cast<std::size_t>(prefix);
-    for (const std::byte byte : response) {
-        if (length + 2 >= line.size()) {
-            break;
+    // The completion marker rides the same body; the caller's status path reports the result.
+    if (request.profileSetupCompleted) {
+        if (state::complete_profile_setup()) {
+            core::log::write(core::log::Channel::server,
+                             core::log::Level::info,
+                             "ev=ws701 stage=profile_setup result=complete");
+        } else {
+            outcome.profileSetupRefused = true;
         }
-        const unsigned value = std::to_integer<unsigned>(byte);
-        line[length++] = kHex[(value >> 4U) & 0xFU];
-        line[length++] = kHex[value & 0xFU];
     }
-    core::log::write(core::log::Channel::server, core::log::Level::debug, {line.data(), length});
-}
 
-/** One line carries the picked id and whether the selection moved. */
-constexpr std::size_t kSelectLineCapacity = 96;
+    state::PendingSettingsUpdate mutation{};
+    const state::SettingsUpdateDisposition disposition =
+        state::prepare_settings_update(request.settings, mutation);
+    if (disposition == state::SettingsUpdateDisposition::preparedMutation) {
+        if (emplace_mutation<state::PendingSettingsUpdate>(outcome, mutation) == nullptr) {
+            return state::SettingsUpdateDisposition::rejected;
+        }
+        core::log::write(core::log::Channel::server,
+                         core::log::Level::debug,
+                         "ev=ws701 stage=prepare result=ready");
+        return disposition;
+    }
+    if (disposition == state::SettingsUpdateDisposition::acceptedNoChange) {
+        core::log::write(core::log::Channel::server,
+                         core::log::Level::debug,
+                         "ev=ws701 stage=prepare result=no_change");
+        return disposition;
+    }
+
+    core::log::write(core::log::Channel::server,
+                     core::log::Level::warn,
+                     "ev=ws701 stage=prepare result=rejected reason=validation");
+    return state::SettingsUpdateDisposition::rejected;
+}
 
 /**
  * Records the player's character pick, which arrives nowhere else.
@@ -241,8 +132,9 @@ void select_character(const middleware::web_service::Message& message, Outcome& 
         return;
     }
     outcome.hasSelectedCharacter = true;
+    outcome.selectedCharacterChanged = changed;
     outcome.selectedCharacterSoid = picked.characterSoid;
-    // Homecoming has no mission node to launch, so its opening cutscene is owed from
+// Homecoming has no mission node to launch, so its opening cutscene is owed from
     // here: the first load after a character is picked plays it instead of the default.
     state::activity::cutscene::arm(picked.characterSoid);
 
@@ -275,60 +167,25 @@ void mutate_equipment(const middleware::web_service::Message& message,
                       Outcome& outcome) noexcept {
     std::uint64_t requestedInstanceSoid = 0;
     if (!parse_equipment_instance(message, requestedInstanceSoid)) {
-        std::array<char, 112> line{};
-        const int count = std::snprintf(line.data(),
-                                        line.size(),
-                                        "ev=equipment stage=parse result=fail opcode=%u "
-                                        "payload_bytes=%zu",
-                                        static_cast<unsigned>(message.opcode),
-                                        message.payload.size());
-        if (count > 0) {
-            core::log::write(core::log::Channel::server,
-                             core::log::Level::warn,
-                             {line.data(), static_cast<std::size_t>(count)});
-        }
-        return;
-    }
-
-    state::PendingEquipmentSwap mutation;
-    const bool prepared = unequip
-                              ? state::prepare_equipment_unequip(requestedInstanceSoid, mutation)
-                              : state::prepare_equipment_swap(requestedInstanceSoid, mutation);
-    if (!prepared) {
-        std::array<char, 144> line{};
-        const int count = std::snprintf(
-            line.data(),
-            line.size(),
-            "ev=equipment stage=prepare result=fail opcode=%u action=%s requested=0x%llX",
-            static_cast<unsigned>(message.opcode),
-            unequip ? "unequip" : "equip",
-            static_cast<unsigned long long>(requestedInstanceSoid));
-        if (count > 0) {
-            core::log::write(core::log::Channel::server,
-                             core::log::Level::warn,
-                             {line.data(), static_cast<std::size_t>(count)});
-        }
-        return;
-    }
-    outcome.mutation = mutation;
-
-    std::array<char, 224> line{};
-    const int count =
-        std::snprintf(line.data(),
-                      line.size(),
-                      "ev=equipment stage=prepare result=ok opcode=%u action=%s character=0x%llX "
-                      "previous=0x%llX requested=0x%llX native_slot=%u moved_items=%zu",
-                      static_cast<unsigned>(message.opcode),
-                      unequip ? "unequip" : "equip",
-                      static_cast<unsigned long long>(mutation.characterSoid),
-                      static_cast<unsigned long long>(mutation.previousInstanceSoid),
-                      static_cast<unsigned long long>(mutation.requestedInstanceSoid),
-                      static_cast<unsigned>(mutation.nativeEquipmentSlot),
-                      mutation.movedItemCount);
-    if (count > 0) {
         core::log::write(core::log::Channel::server,
-                         core::log::Level::debug,
-                         {line.data(), static_cast<std::size_t>(count)});
+                         core::log::Level::warn,
+                         "ev=equipment stage=parse result=fail");
+        return;
+    }
+
+    auto* mutation = emplace_mutation<state::PendingEquipmentSwap>(outcome);
+    if (mutation == nullptr) {
+        return;
+    }
+    const bool prepared = unequip
+                              ? state::prepare_equipment_unequip(requestedInstanceSoid, *mutation)
+                              : state::prepare_equipment_swap(requestedInstanceSoid, *mutation);
+    if (!prepared) {
+        clear_mutation(outcome);
+        core::log::write(core::log::Channel::server,
+                         core::log::Level::warn,
+                         "ev=equipment stage=prepare result=fail");
+        return;
     }
 }
 
@@ -337,56 +194,22 @@ void mutate_subclass_selection(const middleware::web_service::Message& message,
                                Outcome& outcome) noexcept {
     middleware::web_service::messages::opcode801::Request request{};
     if (!middleware::web_service::messages::opcode801::parse_request(message, request)) {
-        std::array<char, 128> line{};
-        const int count =
-            std::snprintf(line.data(),
-                          line.size(),
-                          "ev=ws801 stage=parse result=fail transaction=%u payload_bytes=%zu",
-                          static_cast<unsigned>(message.transactionId),
-                          message.payload.size());
-        if (count > 0) {
-            core::log::write(core::log::Channel::server,
-                             core::log::Level::warn,
-                             {line.data(), static_cast<std::size_t>(count)});
-        }
+        core::log::write(
+            core::log::Channel::server, core::log::Level::warn, "ev=ws801 stage=parse result=fail");
         return;
     }
 
-    state::PendingSubclassSelection mutation{};
+    auto* mutation = emplace_mutation<state::PendingSubclassSelection>(outcome);
+    if (mutation == nullptr) {
+        return;
+    }
     if (!state::prepare_subclass_selection(
-            request.subclassInstanceSoid, request.socketEntry, mutation)) {
-        std::array<char, 160> line{};
-        const int count = std::snprintf(
-            line.data(),
-            line.size(),
-            "ev=ws801 stage=prepare result=fail transaction=%u instance=0x%llX entry=%u",
-            static_cast<unsigned>(message.transactionId),
-            static_cast<unsigned long long>(request.subclassInstanceSoid),
-            static_cast<unsigned>(request.socketEntry));
-        if (count > 0) {
-            core::log::write(core::log::Channel::server,
-                             core::log::Level::warn,
-                             {line.data(), static_cast<std::size_t>(count)});
-        }
-        return;
-    }
-
-    outcome.mutation = mutation;
-    std::array<char, 224> line{};
-    const int count = std::snprintf(
-        line.data(),
-        line.size(),
-        "ev=ws801 stage=prepare result=ok transaction=%u character=0x%llX instance=0x%llX "
-        "entry=%u socket_list=%u",
-        static_cast<unsigned>(message.transactionId),
-        static_cast<unsigned long long>(mutation.characterSoid),
-        static_cast<unsigned long long>(mutation.subclassInstanceSoid),
-        static_cast<unsigned>(mutation.requestedEntry),
-        static_cast<unsigned>(mutation.socketEntryListIndex));
-    if (count > 0) {
+            request.subclassInstanceSoid, request.socketEntry, *mutation)) {
+        clear_mutation(outcome);
         core::log::write(core::log::Channel::server,
-                         core::log::Level::info,
-                         {line.data(), static_cast<std::size_t>(count)});
+                         core::log::Level::warn,
+                         "ev=ws801 stage=prepare result=fail");
+        return;
     }
 }
 
@@ -398,72 +221,24 @@ void mutate_socket_plug(const middleware::web_service::Message& message,
         || !request.hasInstance || request.instanceSoid == 0 || request.hasTargetDefinition
         || !request.hasPlugDefinition
         || request.socketIndex >= state::account::inventory::kPlugCapacity) {
-        std::array<char, 192> line{};
-        const int count = std::snprintf(
-            line.data(),
-            line.size(),
-            "ev=ws903 stage=parse result=fail transaction=%u payload_bytes=%zu has_instance=%u "
-            "instance=0x%llX has_target_definition=%u socket=%u has_plug_definition=%u",
-            static_cast<unsigned>(message.transactionId),
-            message.payload.size(),
-            static_cast<unsigned>(request.hasInstance),
-            static_cast<unsigned long long>(request.instanceSoid),
-            static_cast<unsigned>(request.hasTargetDefinition),
-            request.socketIndex,
-            static_cast<unsigned>(request.hasPlugDefinition));
-        if (count > 0) {
-            core::log::write(core::log::Channel::server,
-                             core::log::Level::warn,
-                             {line.data(), static_cast<std::size_t>(count)});
-        }
+        core::log::write(
+            core::log::Channel::server, core::log::Level::warn, "ev=ws903 stage=parse result=fail");
         return;
     }
 
-    state::PendingSocketPlug mutation{};
+    auto* mutation = emplace_mutation<state::PendingSocketPlug>(outcome);
+    if (mutation == nullptr) {
+        return;
+    }
     if (!state::prepare_socket_plug(request.instanceSoid,
                                     static_cast<std::uint8_t>(request.socketIndex),
                                     request.plugDefinitionIndex,
-                                    mutation)) {
-        std::array<char, 192> line{};
-        const int count = std::snprintf(
-            line.data(),
-            line.size(),
-            "ev=ws903 stage=prepare result=fail transaction=%u instance=0x%llX lane=%u "
-            "plug_definition=%u",
-            static_cast<unsigned>(message.transactionId),
-            static_cast<unsigned long long>(request.instanceSoid),
-            request.socketIndex,
-            static_cast<unsigned>(request.plugDefinitionIndex));
-        if (count > 0) {
-            core::log::write(core::log::Channel::server,
-                             core::log::Level::warn,
-                             {line.data(), static_cast<std::size_t>(count)});
-        }
-        return;
-    }
-
-    outcome.mutation = mutation;
-    std::array<char, 240> line{};
-    const int count = std::snprintf(
-        line.data(),
-        line.size(),
-        "ev=ws903 stage=prepare result=ok transaction=%u character=0x%llX instance=0x%llX "
-        "target_definition=%u target_bucket=%u lane=%u plug_definition=%u plug_bucket=%u "
-        "equipped=%u item_index=%zu",
-        static_cast<unsigned>(message.transactionId),
-        static_cast<unsigned long long>(mutation.characterSoid),
-        static_cast<unsigned long long>(mutation.targetInstanceSoid),
-        static_cast<unsigned>(mutation.targetDefinitionIndex),
-        static_cast<unsigned>(mutation.targetBucketId),
-        static_cast<unsigned>(mutation.socketLane),
-        static_cast<unsigned>(mutation.plugDefinitionIndex),
-        static_cast<unsigned>(mutation.plugBucketId),
-        static_cast<unsigned>(mutation.targetEquipped),
-        mutation.itemIndex);
-    if (count > 0) {
+                                    *mutation)) {
+        clear_mutation(outcome);
         core::log::write(core::log::Channel::server,
-                         core::log::Level::debug,
-                         {line.data(), static_cast<std::size_t>(count)});
+                         core::log::Level::warn,
+                         "ev=ws903 stage=prepare result=fail");
+        return;
     }
 }
 
@@ -473,95 +248,33 @@ void mutate_equipped_socket_plug(const middleware::web_service::Message& message
     namespace opcode1901 = middleware::web_service::messages::opcode1901;
     opcode1901::Request request{};
     const bool parsed = opcode1901::parse_request(message, request);
-    // A request prepares at most one State mutation, so a run naming several sockets cannot be
-    // applied as the one transaction it has to be. It is understood and declined rather than
-    // treated as malformed, and the reply now carries that refusal.
+    // One transaction can stage one socket mutation, so understood batch requests are refused.
     const opcode1901::Replacement& replacement = request.replacements.front();
     if (!parsed || request.replacementCount != 1
         || replacement.modelSocketKind != kEquippedShaderModelSocketKind
         || replacement.auxiliary != 0
         || replacement.socketIndex >= state::account::inventory::kPlugCapacity
         || request.instanceIdentityToken == 0) {
-        std::array<char, 256> line{};
-        const int count = std::snprintf(
-            line.data(),
-            line.size(),
-            "ev=ws1901 stage=parse result=fail transaction=%u payload_bytes=%zu replacements=%zu "
-            "plug_definition=%u canonical_kind=%u model_kind=%u socket=%u auxiliary=0x%llX "
-            "equipment_selector=%llu",
-            static_cast<unsigned>(message.transactionId),
-            message.payload.size(),
-            request.replacementCount,
-            static_cast<unsigned>(replacement.plugDefinitionIndex),
-            static_cast<unsigned>(replacement.canonicalSocketKind),
-            static_cast<unsigned>(replacement.modelSocketKind),
-            replacement.socketIndex,
-            static_cast<unsigned long long>(replacement.auxiliary),
-            static_cast<unsigned long long>(request.equipmentSelector));
-        if (count > 0) {
-            core::log::write(core::log::Channel::server,
-                             core::log::Level::warn,
-                             {line.data(), static_cast<std::size_t>(count)});
-        }
+        core::log::write(core::log::Channel::server,
+                         core::log::Level::warn,
+                         "ev=ws1901 stage=parse result=fail");
         return;
     }
 
-    const std::uint64_t identityToken = request.instanceIdentityToken;
-    state::PendingSocketPlug mutation{};
+    auto* mutation = emplace_mutation<state::PendingSocketPlug>(outcome);
+    if (mutation == nullptr) {
+        return;
+    }
     if (!state::prepare_character_selector_socket_plug(
             request.instanceIdentityToken,
             static_cast<std::uint8_t>(replacement.socketIndex),
             replacement.plugDefinitionIndex,
-            mutation)) {
-        std::array<char, 224> line{};
-        const int count = std::snprintf(
-            line.data(),
-            line.size(),
-            "ev=ws1901 stage=prepare result=fail transaction=%u equipment_selector=%llu "
-            "identity_token=%llu lane=%u plug_definition=%u canonical_kind=%u model_kind=%u "
-            "auxiliary=0x%llX",
-            static_cast<unsigned>(message.transactionId),
-            static_cast<unsigned long long>(request.equipmentSelector),
-            static_cast<unsigned long long>(identityToken),
-            replacement.socketIndex,
-            static_cast<unsigned>(replacement.plugDefinitionIndex),
-            static_cast<unsigned>(replacement.canonicalSocketKind),
-            static_cast<unsigned>(replacement.modelSocketKind),
-            static_cast<unsigned long long>(replacement.auxiliary));
-        if (count > 0) {
-            core::log::write(core::log::Channel::server,
-                             core::log::Level::warn,
-                             {line.data(), static_cast<std::size_t>(count)});
-        }
-        return;
-    }
-
-    outcome.mutation = mutation;
-    std::array<char, 288> line{};
-    const int count = std::snprintf(
-        line.data(),
-        line.size(),
-        "ev=ws1901 stage=prepare result=ok transaction=%u character=0x%llX instance=0x%llX "
-        "equipment_selector=%llu identity_token=%llu target_definition=%u target_bucket=%u "
-        "lane=%u plug_definition=%u plug_bucket=%u canonical_kind=%u model_kind=%u "
-        "auxiliary=0x%llX",
-        static_cast<unsigned>(message.transactionId),
-        static_cast<unsigned long long>(mutation.characterSoid),
-        static_cast<unsigned long long>(mutation.targetInstanceSoid),
-        static_cast<unsigned long long>(request.equipmentSelector),
-        static_cast<unsigned long long>(identityToken),
-        static_cast<unsigned>(mutation.targetDefinitionIndex),
-        static_cast<unsigned>(mutation.targetBucketId),
-        static_cast<unsigned>(mutation.socketLane),
-        static_cast<unsigned>(mutation.plugDefinitionIndex),
-        static_cast<unsigned>(mutation.plugBucketId),
-        static_cast<unsigned>(replacement.canonicalSocketKind),
-        static_cast<unsigned>(replacement.modelSocketKind),
-        static_cast<unsigned long long>(replacement.auxiliary));
-    if (count > 0) {
+            *mutation)) {
+        clear_mutation(outcome);
         core::log::write(core::log::Channel::server,
-                         core::log::Level::debug,
-                         {line.data(), static_cast<std::size_t>(count)});
+                         core::log::Level::warn,
+                         "ev=ws1901 stage=prepare result=fail");
+        return;
     }
 }
 
@@ -569,56 +282,24 @@ void mutate_equipped_socket_plug(const middleware::web_service::Message& message
 void mutate_item_state(const middleware::web_service::Message& message, Outcome& outcome) noexcept {
     middleware::web_service::messages::opcode406::Request request{};
     if (!middleware::web_service::messages::opcode406::parse_request(message, request)) {
-        std::array<char, 224> line{};
-        const int count = std::snprintf(
-            line.data(),
-            line.size(),
-            "ev=ws406 stage=parse result=fail transaction=%u payload_bytes=%zu instance=0x%llX "
-            "definition=%u flags=0x%X",
-            static_cast<unsigned>(message.transactionId),
-            message.payload.size(),
-            static_cast<unsigned long long>(request.instanceSoid),
-            static_cast<unsigned>(request.definitionIndex),
-            request.flags);
-        if (count > 0) {
-            core::log::write(core::log::Channel::server,
-                             core::log::Level::warn,
-                             {line.data(), static_cast<std::size_t>(count)});
-        }
+        core::log::write(
+            core::log::Channel::server, core::log::Level::warn, "ev=ws406 stage=parse result=fail");
         return;
     }
 
-    const std::uint64_t instanceSoid = request.instanceSoid;
-    const std::uint32_t flags = request.flags;
-    state::PendingItemState mutation{};
-    if (!state::prepare_item_state(instanceSoid, request.definitionIndex, flags, mutation)) {
+    auto* mutation = emplace_mutation<state::PendingItemState>(outcome);
+    if (mutation == nullptr) {
         return;
     }
-    outcome.mutation = mutation;
-    std::array<char, 224> line{};
-    const int count = std::snprintf(
-        line.data(),
-        line.size(),
-        "ev=ws406 stage=prepare result=ok transaction=%u character=0x%llX instance=0x%llX "
-        "definition=%u flags_before=0x%X flags_after=0x%X equipped=%u item_index=%zu",
-        static_cast<unsigned>(message.transactionId),
-        static_cast<unsigned long long>(mutation.characterSoid),
-        static_cast<unsigned long long>(mutation.targetInstanceSoid),
-        static_cast<unsigned>(mutation.targetDefinitionIndex),
-        mutation.beforeFlags,
-        mutation.afterFlags,
-        mutation.targetEquipped ? 1U : 0U,
-        mutation.itemIndex);
-    if (count > 0) {
-        core::log::write(core::log::Channel::server,
-                         core::log::Level::debug,
-                         {line.data(), static_cast<std::size_t>(count)});
+    if (!state::prepare_item_state(
+            request.instanceSoid, request.definitionIndex, request.flags, *mutation)) {
+        clear_mutation(outcome);
+        return;
     }
 }
 
-/** Records strict opcode-402 parsing, identity checks, and State preparation outcomes. */
+/** Reports an opcode-402 validation failure. */
 void report_item_dismantle(const middleware::web_service::Message& message,
-                           std::string_view result,
                            std::string_view reason,
                            std::uint64_t instanceSoid,
                            std::uint32_t definitionIndex,
@@ -628,10 +309,8 @@ void report_item_dismantle(const middleware::web_service::Message& message,
     const int count = std::snprintf(
         line.data(),
         line.size(),
-        "ev=ws402 stage=prepare result=%.*s reason=%.*s transaction=%u payload_bytes=%zu "
+        "ev=ws402 stage=prepare result=fail reason=%.*s transaction=%u payload_bytes=%zu "
         "instance=0x%llX definition_index=%u definition_hash=0x%08X quantity=%u",
-        static_cast<int>(result.size()),
-        result.data(),
         static_cast<int>(reason.size()),
         reason.data(),
         static_cast<unsigned>(message.transactionId),
@@ -640,11 +319,7 @@ void report_item_dismantle(const middleware::web_service::Message& message,
         definitionIndex,
         definitionHash,
         quantity);
-    if (count > 0) {
-        core::log::write(core::log::Channel::server,
-                         result == "ok" ? core::log::Level::debug : core::log::Level::warn,
-                         {line.data(), static_cast<std::size_t>(count)});
-    }
+    write_warning(line, count);
 }
 
 /** Prepares the exact fixed-width opcode-402 Character-inventory removal request. */
@@ -652,7 +327,7 @@ void dismantle_item(const middleware::web_service::Message& message, Outcome& ou
     middleware::web_service::messages::opcode402::Request request{};
     if (!middleware::web_service::messages::opcode402::parse_request(message, request)) {
         report_item_dismantle(
-            message, "fail", "payload_bits", request.instanceSoid, request.definitionIndex, 0, 0);
+            message, "payload_bits", request.instanceSoid, request.definitionIndex, 0, 0);
         return;
     }
     const std::uint64_t instanceSoid = request.instanceSoid;
@@ -664,13 +339,22 @@ void dismantle_item(const middleware::web_service::Message& message, Outcome& ou
     state::build_data::items::Definition definition{};
     if (!state::build_data::find_item_definition_index(definitionIndex, definition)) {
         report_item_dismantle(
-            message, "fail", "definition", instanceSoid, definitionIndex, 0, kSingleQuantity);
+            message, "definition", instanceSoid, definitionIndex, 0, kSingleQuantity);
         return;
     }
-    state::PendingItemDismantle mutation{};
-    if (!state::prepare_item_dismantle(instanceSoid, mutation)) {
+    auto* mutation = emplace_mutation<state::PendingItemDismantle>(outcome);
+    if (mutation == nullptr) {
         report_item_dismantle(message,
-                              "fail",
+                              "storage",
+                              instanceSoid,
+                              definitionIndex,
+                              definition.definitionHash,
+                              kSingleQuantity);
+        return;
+    }
+    if (!state::prepare_item_dismantle(instanceSoid, *mutation)) {
+        clear_mutation(outcome);
+        report_item_dismantle(message,
                               "state",
                               instanceSoid,
                               definitionIndex,
@@ -678,10 +362,10 @@ void dismantle_item(const middleware::web_service::Message& message, Outcome& ou
                               kSingleQuantity);
         return;
     }
-    if (mutation.dismantledItem.definitionHash != definition.definitionHash
-        || mutation.dismantledItem.quantity != static_cast<std::int32_t>(kSingleQuantity)) {
+    if (mutation->dismantledItem.definitionHash != definition.definitionHash
+        || mutation->dismantledItem.quantity != static_cast<std::int32_t>(kSingleQuantity)) {
+        clear_mutation(outcome);
         report_item_dismantle(message,
-                              "fail",
                               "identity",
                               instanceSoid,
                               definitionIndex,

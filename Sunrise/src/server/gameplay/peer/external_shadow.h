@@ -23,7 +23,8 @@ struct EmptyFrame {
 
 /**
  * Reads one complete empty-channel frame without changing output on failure.
- * TODO: no caller yet. Both entry points here wait on the `gameplay_external_body` gate.
+ * TODO: no caller yet. Both entry points here wait on the packet-outcome binding to the
+ * established writer.
  */
 [[nodiscard]] middleware::gameplay::external::EmptyProfileResult
 read_empty_frame(middleware::encoding::bits::Reader& reader, EmptyFrame& output) noexcept;

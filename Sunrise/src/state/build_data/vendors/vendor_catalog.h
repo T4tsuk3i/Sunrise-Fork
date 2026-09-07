@@ -73,11 +73,7 @@ void clear() noexcept;
 sale_rows(const Definition& definition, std::span<SaleRow> output, std::size_t& count) noexcept;
 
 /**
- * Reads one sale row of one definition.
- *
- * A purchase names a single row, and copying the definition's whole range to read it costs a
- * bank-sized buffer per caller. This reads the one row under the catalog lock.
- *
+ * Reads one sale row of one definition, under the catalog lock.
  * @param definition Definition whose range is read.
  * @param row Row ordinal inside that definition.
  * @param output Receives the row, or a cleared row when the definition does not own it.

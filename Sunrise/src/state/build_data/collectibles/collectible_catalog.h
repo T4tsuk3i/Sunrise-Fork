@@ -13,16 +13,19 @@ inline constexpr std::size_t kDefinitionCapacity = 1U << 15U;
 inline constexpr std::uint16_t kUnavailableItemDefinitionIndex = 0xFFFFU;
 
 /**
- * Collectible row meaning "this item has no collectible".
- *
- * Vendor sale rows name an item, never a collectible, and bounties, quests and tokens have none at
- * all. An acquisition carrying this index skips every collectible step - validation, the material
- * charge, and the cost bookkeeping - and both prepare and commit must agree on it, so the
- * consistency guard still holds rather than being bypassed.
+ * An acquisition carrying this index has no collectible and skips every collectible step.
+ * Prepare and commit must both carry it, or the acquisition's consistency guard refuses.
  */
 inline constexpr std::uint16_t kNoCollectibleIndex = 0xFFFEU;
 /** A collectible with no acquisition charge carries this native requirement-set sentinel. */
 inline constexpr std::uint16_t kUnavailableMaterialRequirementSetIndex = 0xFFFFU;
+
+/** A collectible whose acquired state is not one plain flag test carries this instead of a slot. */
+inline constexpr std::uint16_t kUnavailableFlagSlot = 0xFFFFU;
+
+/** A collectible whose acquired flag no mapping table addresses carries this instead of a row. */
+inline constexpr std::uint16_t kUnavailableFlagIndex = 0xFFFFU;
+
 /** Installed requirement sets contain at most six material rows. */
 inline constexpr std::size_t kMaterialRequirementCapacity = 6;
 
@@ -41,6 +44,10 @@ struct Definition {
     std::uint16_t collectibleIndex{};
     std::uint16_t itemDefinitionIndex{kUnavailableItemDefinitionIndex};
     std::uint16_t materialRequirementSetIndex{kUnavailableMaterialRequirementSetIndex};
+    /** Unlock flag slot the acquired-state expression tests, when it tests exactly one. */
+    std::uint16_t acquiredFlagSlot{kUnavailableFlagSlot};
+    /** Bank row that slot feeds inside the object its kind names, or the unavailable row. */
+    std::uint16_t acquiredFlagIndex{kUnavailableFlagIndex};
     std::uint8_t materialRequirementCount{};
     std::array<MaterialRequirement, kMaterialRequirementCapacity> materialRequirements{};
 };
@@ -65,12 +72,7 @@ void clear() noexcept;
 [[nodiscard]] bool grants_item(std::uint16_t itemDefinitionIndex) noexcept;
 
 /**
- * Finds the collectible that grants one installed item row.
- *
- * The reverse of `find`. A vendor sale row names an item and never a collectible, while the
- * acquisition state is keyed by collectible, so a purchase has to ask this. Walking the table under
- * its own lock is what stops a caller copying all 32,768 rows to read one.
- *
+ * Finds the collectible that grants one installed item row, the reverse of `find`.
  * @param itemDefinitionIndex Installed item-definition row.
  * @param collectibleIndex Receives the first collectible naming that item, in native index order.
  *        Left untouched when none does, so a caller's sentinel survives.

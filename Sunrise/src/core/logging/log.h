@@ -63,11 +63,9 @@ void write(Channel channel, Level level, std::string_view event) noexcept;
 
 /**
  * Formats and emits one structured event when allowed by the channel threshold.
- *
- * The line is built in `kLineCapacity` storage and truncated to fit, which is what every caller
- * that spelled out its own array and `snprintf` did by hand. Nothing is formatted for a level the
- * channel refuses, so a debug line costs nothing when debug is off.
- *
+*
+ * The line is built in `kLineCapacity` storage and truncated to fit.
+ * Nothing is formatted for a level the channel refuses.
  * @param channel Subsystem owning the event.
  * @param level Severity of the event.
  * @param format printf-style format; `%s` arguments must be NUL-terminated.

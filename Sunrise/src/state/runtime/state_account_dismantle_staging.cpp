@@ -500,12 +500,8 @@ apply_dismantle_rewards(const AccountState& before,
         return false;
     }
 
-    // Every survivor must still resolve to the same equipment lane, and how many the removal
-    // shifted is reported so a dismantle that rearranged a bucket stays visible. Their ordering
-    // tokens are deliberately left alone: the serial on an unequipped row is also the Client's
-    // ordering token for its bucket, and a fresh serial moves the item to the first cell. The rows
-    // below a dismantled item shift up only because the array closed the gap; stamping them
-    // reshuffled the bucket on screen. The whole character is republished, so the shift still lands.
+    // Survivors keep their serials: the serial is also the Client's bucket ordering token, so a
+    // fresh one moves the item to the first cell. The whole character is republished either way.
     std::size_t movedItemCount = 0;
     for (std::size_t index = 0; index < after.inventory.count; ++index) {
         const std::uint64_t survivorSoid = after.inventory.values[index].instanceSoid;
@@ -551,16 +547,13 @@ apply_dismantle_rewards(const AccountState& before,
         || dismantledDetail.definitionIndex != dismantledDefinition.definitionIndex
         || dismantledDetail.definitionHash != dismantledDefinition.definitionHash
         || dismantledDetail.bucketId != dismantledDefinition.bucketId
-        // A quest step is authored stackable, not instanced - in the pursuit bucket only bounties
-        // and containers set the instanced flag - so it is accepted while the row holds exactly
-        // one. A larger stack stays refused: decrementing one is a different mutation.
+        // A quest step is authored stackable, so a single-unit row is accepted. A larger stack is
+        // refused: decrementing one is a different mutation.
         || (dismantledDetail.instancedDefinitionState
                 != item_details::InstancedDefinitionState::instanced
             && dismantledItem.quantity != 1)
-        // A pursuit names no equipment slot, because nothing equips it. The loadout resolver stands
-        // such an item at slot zero, so compare against that default rather than demand a slot.
-        // Native slot zero is the subclass slot, which `gear_class_of` maps to no gear class, so a
-        // dismantled pursuit pays out nothing.
+        // A pursuit names no equipment slot, and the loadout resolver stands it at slot zero.
+        // Slot zero maps to no gear class, so a dismantled pursuit pays out nothing.
         || (dismantledDetail.equipmentSlot.has_value()
                 ? static_cast<std::uint8_t>(*dismantledDetail.equipmentSlot)
                 : std::uint8_t{0})

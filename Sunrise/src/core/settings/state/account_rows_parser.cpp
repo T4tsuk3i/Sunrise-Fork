@@ -10,10 +10,9 @@ namespace {
 constexpr std::uint64_t kMaximumCharacterLevel = (std::numeric_limits<std::uint8_t>::max)();
 /** A destination definition hash is one unsigned 32-bit field. */
 constexpr std::uint64_t kMaximumDestinationHash = (std::numeric_limits<std::uint32_t>::max)();
-
-} // namespace
-
-namespace {
+/** The travelling-activity index is one unsigned 16-bit field in the family-4 character. */
+constexpr std::uint64_t kMaximumTravellingActivityIndex =
+    (std::numeric_limits<std::uint16_t>::max)();
 
 /** Sets the tier bit one rarity name stands for. */
 [[nodiscard]] bool dismantle_tier_bit(std::string_view name, std::uint8_t& mask) noexcept {
@@ -42,8 +41,7 @@ namespace {
 
 } // namespace
 
-/** Parses the materials credited by ordinary gear dismantles, with optional rarity/class filters.
- */
+/** Parses the materials credited by gear dismantles, with optional rarity and class filters. */
 bool Parser::dismantle_rewards(state::AccountState& output) noexcept {
     output.dismantleRewards = {};
     output.dismantleRewardCount = 0;
@@ -282,10 +280,6 @@ bool Parser::character(state::CharacterState& output) noexcept {
                 return false;
             }
             output.level = static_cast<std::uint8_t>(value);
-        } else if (key == "accepted") {
-            if (!boolean(output.accepted)) {
-                return false;
-            }
         } else if (key == "preview_available") {
             if (!boolean(output.previewAvailable)) {
                 return false;
@@ -300,15 +294,20 @@ bool Parser::character(state::CharacterState& output) noexcept {
                 return false;
             }
             output.lastOrbitedDestination = static_cast<std::uint32_t>(value);
+        } else if (key == "current_activity_index") {
+            std::uint64_t value = 0;
+            if (!unsigned_value(value) || value > kMaximumTravellingActivityIndex) {
+                return false;
+            }
+            output.currentActivityIndex = static_cast<std::uint16_t>(value);
         } else if (key == "content_bypass") {
             if (!boolean(output.contentBypass)) {
                 return false;
             }
         } else if (key == "movement_ability" || key == "grenade_ability" || key == "super_ability"
                    || key == "melee_ability" || key == "class_ability") {
-            // Deliberately ignored on load. The subclass screen's first paint each login shows
-            // the ability-entry struct defaults below, so restoring a persisted pick would leave
-            // that paint disagreeing with what is equipped. Still written out, never read back.
+            // Written out but never read back: the subclass screen's first paint each login shows
+            // the ability-entry defaults, which a restored pick would contradict.
             if (!skip_value(0)) {
                 return false;
             }

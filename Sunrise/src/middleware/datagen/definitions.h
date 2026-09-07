@@ -20,6 +20,11 @@ inline constexpr std::uint32_t kCharacterObjectId = 0xE5E86992U;
 /** Object id for the family-four item-instance slot. */
 inline constexpr std::uint32_t kItemInstanceObjectId = 0x6CFBA3ABU;
 
+/** Object id for the family-five account unlock slot. */
+inline constexpr std::uint32_t kUnlockObjectId = 0x8C4757F3U;
+/** Family five is global, so its record and its one object share this fixed sentinel key. */
+inline constexpr std::uint64_t kUnlockSentinelSoid = 0x7FFFFFFFFFFFFFFFULL;
+
 /** Object id for the family-two social roster directory slot. */
 inline constexpr std::uint32_t kSocialRosterDirectoryObjectId = 0xDA277CE4U;
 /** Object id for the family-two social roster member slot. */
@@ -34,6 +39,7 @@ inline constexpr std::uint32_t kBannerFamily = 0;
 inline constexpr std::uint32_t kSocialRosterFamily = 2;
 inline constexpr std::uint32_t kRosterFamily = 3;
 inline constexpr std::uint32_t kAccountFamily = 4;
+inline constexpr std::uint32_t kUnlockFamily = 5;
 
 /** Slots those objects occupy. */
 inline constexpr std::uint32_t kRosterSlot = 0;

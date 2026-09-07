@@ -28,11 +28,16 @@ struct Controls {
     std::int32_t mouseLookSensitivity{};
     bool mouseInvertVertical{};
     bool mouseInvertHorizontal{};
-    /** Kept toggle whose user-facing role the target build does not expose. */
+    /**
+     * WS-701 preference field 36, a replicated Boolean between controller vibration and mouse aim
+     * smoothing. Its purpose is unverified, so it is round-tripped rather than named.
+     */
     bool unidentifiedToggle{};
     bool mouseAimSmoothing{};
     float adsSensitivityModifier{};
     std::int8_t doublePressDelay{};
+
+    bool operator==(const Controls&) const = default;
 };
 
 /** Authored voice and volume preferences. */
@@ -47,6 +52,8 @@ struct Audio {
     std::int8_t soundEffectsVolume{};
     std::int8_t dialogueVolume{};
     std::int8_t musicVolume{};
+
+    bool operator==(const Audio&) const = default;
 };
 
 /** Authored screen and renderer preferences. */
@@ -62,6 +69,8 @@ struct Display {
     float calibrationPrimary{};
     /** Second unidentified renderer-calibration scalar. */
     float calibrationAlpha{};
+
+    bool operator==(const Display&) const = default;
 };
 
 /** Authored HUD, subtitle, reticle, and text presentation preferences. */
@@ -81,6 +90,8 @@ struct Interface {
     /** Kept text mode with no localized title in the target build. */
     std::int8_t reservedTextMode{};
     std::int8_t subtitleOptionsEntry{};
+
+    bool operator==(const Interface&) const = default;
 };
 
 /** Authored matchmaking, identity, voice, and chat preferences. */
@@ -96,6 +107,8 @@ struct Social {
     std::int8_t localChatJoinMode{};
     std::int8_t clanChatJoinMode{};
     std::int8_t chatAutoHideMode{};
+
+    bool operator==(const Social&) const = default;
 };
 
 /** Complete authored account-setting values, independent of their native record layout. */
@@ -109,6 +122,8 @@ struct AccountSettings {
     bindings::KeyBindings keyBindings;
     /** True only when a settings object was supplied by configuration. */
     bool configured{};
+
+    bool operator==(const AccountSettings&) const = default;
 };
 
 /**

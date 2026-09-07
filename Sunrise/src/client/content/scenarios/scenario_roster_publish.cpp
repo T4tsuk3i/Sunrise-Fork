@@ -1,6 +1,9 @@
 #include <algorithm>
+#include <array>
 #include <cstddef>
+#include <cstdio>
 
+#include "../../../core/logging/log.h"
 #include "../../../middleware/content/packages/tables/roster_intersection.h"
 #include "internal.h"
 
@@ -8,6 +11,9 @@ namespace sunrise::client::content::scenarios {
 namespace {
 
 namespace tables = middleware::content::packages::tables;
+
+/** Size of one publish line: the fixed fields plus the hex values that follow them. */
+constexpr std::size_t kPublishLineCapacity = 192;
 
 /**
  * Orders the safe groups the way the destination publishes them.
@@ -99,6 +105,62 @@ void publish_per_bubble(Walk& walk, layouts::Definition& row) noexcept {
 
 } // namespace
 
+/**
+ * Names every candidate and every intersection key one destination reached, and what became of it.
+ * A candidate lost in the split leaves no other trace; the row just publishes fewer groups.
+ * @param walk Accumulator for one destination, before the split consumes it.
+ * @param row Destination row being published into.
+ */
+void report_publish(const Walk& walk, const layouts::Definition& row) noexcept {
+    if (!core::log::accepts(core::log::Channel::state, core::log::Level::debug)) {
+        return;
+    }
+    const tables::RosterIntersection& seen = walk.intersection;
+    std::array<char, kPublishLineCapacity> line{};
+    int written = std::snprintf(line.data(),
+                                line.size(),
+                                "ev=build_data stage=publish tag=0x%08X keys=%zu candidates=%zu "
+                                "overflow=%u unresolved_set=%u observed=0x%llX top=%u bubble=%u",
+                                row.tag,
+                                seen.keyCount,
+                                walk.candidateCount,
+                                seen.overflowed ? 1U : 0U,
+                                seen.unresolvedSet ? 1U : 0U,
+                                static_cast<unsigned long long>(seen.observedSets),
+                                static_cast<unsigned>(row.rosterGroupCount),
+                                static_cast<unsigned>(row.bubbleGroupCount));
+    if (written > 0) {
+        core::log::write(core::log::Channel::state,
+                         core::log::Level::debug,
+                         {line.data(), static_cast<std::size_t>(written)});
+    }
+    // One line per key, because the split is decided per key: a mask equal to `observed` is
+    // top-level, a partial mask is per-bubble, and zero is dropped.
+    for (std::size_t index = 0; index < seen.keyCount; ++index) {
+        const std::uint64_t mask = seen.masks[index];
+        const char* fate = mask == 0 ? "none" : mask == seen.observedSets ? "all" : "partial";
+        // A key with no candidate cannot publish: the split matches candidates against keys.
+        bool paired = false;
+        for (std::size_t candidate = 0; candidate < walk.candidateCount; ++candidate) {
+            paired = paired || walk.candidates[candidate].key == seen.keys[index];
+        }
+        written = std::snprintf(line.data(),
+                                line.size(),
+                                "ev=build_data stage=publish_key tag=0x%08X key=0x%08X "
+                                "mask=0x%llX fate=%s paired=%u",
+                                row.tag,
+                                seen.keys[index],
+                                static_cast<unsigned long long>(mask),
+                                fate,
+                                paired ? 1U : 0U);
+        if (written > 0) {
+            core::log::write(core::log::Channel::state,
+                             core::log::Level::debug,
+                             {line.data(), static_cast<std::size_t>(written)});
+        }
+    }
+}
+
 /** Splits the candidates between the destination row's two lists. */
 void publish_groups(Walk& walk, layouts::Definition& row) noexcept {
     row.rosterGroupCount = 0;
@@ -110,6 +172,7 @@ void publish_groups(Walk& walk, layouts::Definition& row) noexcept {
     // The per-bubble half is independent of the top-level one: its keys register through the
     // delta's own field 1, and a destination may reach one half and not the other.
     publish_per_bubble(walk, row);
+    report_publish(walk, row);
 }
 
 } // namespace sunrise::client::content::scenarios

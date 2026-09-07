@@ -2,16 +2,22 @@
 
 #include "../../content/content_catalog.h"
 #include "../abilities/ability_bucket_catalog.h"
+#include "../bounties/bounty_catalog.h"
 #include "../collectibles/collectible_catalog.h"
 #include "../constants/investment_constant_catalog.h"
 #include "../hash_names/hash_name_catalog.h"
 #include "../inventory/buckets/inventory_bucket_catalog.h"
+#include "../items/catalysts/exotic_catalyst_catalog.h"
 #include "../items/details/item_detail_catalog.h"
 #include "../items/socket_plugs/socket_plug_catalog.h"
 #include "../material_requirements/material_requirement_catalog.h"
+#include "../nodes/node_catalog.h"
 #include "../progressions/progression_catalog.h"
+#include "../records/record_catalog.h"
 #include "../runtime.h"
 #include "../scenarios/scenario_catalog.h"
+#include "../season_pass/season_pass_catalog.h"
+#include "../sobjects/sobject_catalog.h"
 #include "../socket_entry_buckets/socket_entry_bucket_catalog.h"
 #include "../socket_entry_lists/socket_entry_list_catalog.h"
 #include "../spawn_sets/spawn_set_catalog.h"
@@ -114,12 +120,20 @@ bool progression_definitions_ready() noexcept {
     return progressions::count() != 0;
 }
 
-/** Publishes the whole progression definition table in one step. */
-bool publish_progression_definitions(
-    std::span<const progressions::Definition> definitions) noexcept {
+/** Publishes the whole progression definition table and its step bank in one step. */
+bool publish_progression_definitions(std::span<const progressions::Definition> definitions,
+                                     std::span<const progressions::Step> steps) noexcept {
     runtime::persistence::Transaction transaction;
     return transaction.active()
-           && transaction.finish(progressions::replace(definitions), progressions::clear);
+           && transaction.finish(progressions::replace(definitions, steps), progressions::clear);
+}
+
+/** Reads what each rank of one progression costs, in rank order. */
+bool find_progression_steps(std::uint16_t definitionIndex,
+                            std::span<progressions::Step> output,
+                            std::size_t& count) noexcept {
+    count = 0;
+    return progression_definitions_ready() && progressions::steps(definitionIndex, output, count);
 }
 
 /** @return True when a complete destination-layout domain, empty or not, is published. */
@@ -324,9 +338,9 @@ bool find_investment_constants(constants::InvestmentConstants& value) noexcept {
     return constants::find(value);
 }
 
-/** @return True when the installed vendor index is in State. */
+/** @return True when the vendor index and a definition for every row of it are in State. */
 bool vendor_catalog_ready() noexcept {
-    return vendors::count() != 0;
+    return vendors::count() != 0 && vendors::definition_count() != 0;
 }
 
 /** Publishes the vendor index and every extracted vendor definition in one step. */
@@ -338,19 +352,6 @@ bool publish_vendor_catalog(std::span<const vendors::IndexEntry> index,
     return transaction.active()
            && transaction.finish(vendors::replace(index, definitions, saleRows, installedRows),
                                  vendors::clear);
-}
-
-/** Finds one vendor's index row. */
-bool find_vendor_index(std::uint32_t definitionHash, vendors::IndexEntry& entry) noexcept {
-    entry = {};
-    return vendor_catalog_ready() && vendors::find_hash(definitionHash, entry);
-}
-
-/** Finds one extracted vendor definition. */
-bool find_vendor_definition(std::uint32_t definitionHash,
-                            vendors::Definition& definition) noexcept {
-    definition = {};
-    return vendor_catalog_ready() && vendors::find(definitionHash, definition);
 }
 
 namespace runtime {
@@ -365,10 +366,16 @@ void clear_catalogs() noexcept {
     items::details::clear();
     details::clear();
     items::socket_plugs::clear();
+    items::catalysts::clear();
     inventory::buckets::clear();
     socket_entry_lists::clear();
     rollback_ability_publication();
     progressions::clear();
+    season_pass::clear();
+    bounties::clear();
+    records::clear();
+    nodes::clear();
+    sobjects::clear();
     scenarios::clear();
     rollback_spawn_catalog_publication();
     rollback_name_catalog_publication();

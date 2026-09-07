@@ -174,9 +174,8 @@ void report_upgrade(bool stored) noexcept {
 
 /**
  * Drops a leading UTF-8 byte order mark.
- * Notepad and PowerShell's `Set-Content -Encoding utf8` both write one, and the parser reads it
- * as a stray token. That made an unparsable file, and an unparsable file kills startup before
- * the log opens, so the failure arrives with nothing to read.
+ * Common editors write one and the parser would read it as a stray token, which fails startup
+ * before the log opens.
  * @param document Whole settings text as read from disk.
  * @return The same text with any BOM removed.
  */

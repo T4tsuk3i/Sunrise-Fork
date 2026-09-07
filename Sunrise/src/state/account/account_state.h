@@ -13,6 +13,8 @@ namespace sunrise::state {
 inline constexpr std::size_t kCharacterCapacity = 3;
 /** A server-authored dismantle policy: a few rows per rarity and gear class. */
 inline constexpr std::size_t kDismantleRewardPolicyCapacity = 32;
+/** Native sentinel used when a character has no title equipped. */
+inline constexpr std::uint16_t kUnequippedTitleRecordIndex = 0xFFFFU;
 
 /** The client-authored appearance header both character encoders publish verbatim. */
 inline constexpr std::size_t kAppearanceHeaderSize = 36;
@@ -85,13 +87,10 @@ enum class CharacterClass : std::uint8_t {
 
 /** Default movement entry. Each subclass offers 3, as entries 4, 5 and 6 of its group. */
 inline constexpr std::uint8_t kDefaultMovementAbilityEntry = 4;
-/** No socket entry list declares more entries than this, so a larger value is not an entry. */
-inline constexpr std::uint8_t kMaximumMovementAbilityEntry = 63;
 
 /**
- * Socket entries of the other abilities a subclass lets the player choose. Each names one entry
- * of that ability's group. The subclass offers several and the character picks one. These
- * defaults are the first option of each group, where every shipped subclass starts.
+ * Default grenade entry. Each of the ability defaults names one entry of that ability's group.
+ * They are the first option of each group, where every shipped subclass starts.
  */
 inline constexpr std::uint8_t kDefaultGrenadeAbilityEntry = 7;
 /** Default super entry. It is the lane that carries no plug source and kind 34. */
@@ -142,14 +141,26 @@ struct CharacterState {
     CharacterGender gender{CharacterGender::male};
     CharacterClass characterClass{CharacterClass::titan};
     std::uint8_t level{};
-    bool accepted{};
     bool previewAvailable{};
     /** Authored scalar kept for the family-specific character presentation encoders. */
     float appearanceValue{};
     /** Compact default destination hash used until a later runtime selection replaces it. */
     std::uint32_t lastOrbitedDestination{};
+    /**
+     * Activity whose orbit bubble the character is in, family-4 `+45896`. Authored at sign-in.
+     * A launch moves it to the target before the client's launch commit, which latches it.
+     */
+    std::uint16_t currentActivityIndex{};
     /** Server policy that arms content checks only with the matching family-5 flag. */
     bool contentBypass{};
+    /** Native DestinyRecordDefinition row of the equipped earned title. */
+    std::uint16_t equippedTitleRecordIndex{kUnequippedTitleRecordIndex};
+    /**
+     * Unix seconds the account signed in, from one clock read shared by every character.
+     * The character records publish it as their last applied daily and weekly reset; zero
+     * makes both rollovers due the moment the client accepts the record.
+     */
+    std::uint64_t signInSeconds{};
     /**
      * Appearance header captured from the create-character request, in record byte order.
      * Its values index per-race customization tables, so it is only meaningful beside the race
@@ -168,6 +179,8 @@ struct CharacterState {
     account::inventory::Equipment equipment;
     /** Unequipped items routed into their installed character-inventory bucket ranges. */
     account::inventory::CharacterItems inventory;
+    /** Non-instanced character materials granted at runtime. */
+    account::inventory::CharacterStacks stacks;
     /** Next row generation; equip transactions consume two values for the two moved items. */
     std::uint32_t nextInventorySerial{};
 };
@@ -184,6 +197,8 @@ struct AccountState {
     std::size_t profileItemCount{};
     std::array<CharacterState, kCharacterCapacity> characters{};
     std::size_t characterCount{};
+    /** True after this account has completed the client's one-time profile setup flow. */
+    bool profileSetupCompleted{};
     account::settings::AccountSettings settings;
 };
 

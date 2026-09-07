@@ -1,29 +1,30 @@
-﻿#include "activity_message_route.h"
+#include "activity_message_route.h"
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
+#include <cstdint>
 #include <cstdio>
+#include <span>
 
 #include "../../../../core/logging/log.h"
 #include "../../../../core/settings/settings.h"
-#include "../../../../middleware/bap/activity_message/activity_client_identity_parser.h"
-#include "../../../../middleware/bap/activity_message/activity_client_keepalive_validator.h"
-#include "../../../../middleware/bap/activity_message/activity_high_water_validator.h"
 #include "../../../../middleware/bap/activity_message/activity_join_request_parser.h"
-#include "../../../../middleware/bap/activity_message/activity_membership_acknowledgement_parser.h"
 #include "../../../../middleware/bap/activity_message/activity_message_request_parser.h"
-#include "../../../../middleware/bap/activity_message/activity_state_refresh_parser.h"
-#include "../../../../middleware/bap/activity_message/client_authoritative_data.h"
-#include "../../../../middleware/bap/activity_message/entity_authority.h"
 #include "../../../../middleware/bap/activity_message/entity_slots.h"
-#include "../../../../middleware/bap/activity_message/incident.h"
-#include "../../../../middleware/bap/activity_message/peer_ledger.h"
-#include "../../../../middleware/bap/activity_message/sense_update.h"
-#include "../../../../middleware/bap/activity_message/start_activity.h"
-#include "../../../../middleware/bap/activity_message/telemetry.h"
+#include "../../../../middleware/bap/activity_message/wire_schema/activity_communication_route.h"
+#include "../../../../middleware/crypto/hmac.h"
+#include "../../../../middleware/crypto/random_bytes.h"
 #include "../../../../middleware/encoding/byte_order.h"
+#include "../../../../state/activity/membership/activity_membership_query.h"
 #include "../../../../state/activity/receipts/activity_receipts.h"
 #include "../../../../state/activity/runtime.h"
+#include "../../../../state/activity_sdk/runtime.h"
+#include "../../../activity/host_runtime.h"
+#include "../../../gameplay/gameplay_advertisement.h"
+#include "../push/activity/activity_arrival.h"
+#include "../push/activity/internal.h"
+#include "activity_message_route_internal.h"
 #include "membership/activity_membership_route.h"
 #include "middleware/bap/activity_message/activity_entity_slot_request_parser.h"
 #include "patch_epoch/activity_patch_epoch_route.h"
@@ -32,22 +33,63 @@
 namespace sunrise::server::bap::encrypted::activity_message {
 namespace {
 
-namespace service = middleware::bap::activity_message;
-namespace authority = service::entity_authority;
-namespace client_keepalive = service::client_keepalive;
-namespace high_water = service::high_water;
-namespace epoch_message = service::patch_epoch;
-namespace ledger = service::peer_ledger;
-namespace telemetry = service::telemetry;
-namespace store = state::activity::receipts;
+namespace activity_sdk = state::activity_sdk;
 
-/** Activity message type 3 starts the client join transaction. */
-constexpr std::uint32_t kJoinRequestMessageType = 3;
-/**
- * Activity message type 8 is a client-local request the transport converts into its own service.
- * On this route it is an authenticated but invalid use, never a second session allocation.
- */
-constexpr std::uint32_t kLocalActivityHostMessageType = 8;
+/** Asks for the membership snapshot as it stands, naming no bubble. */
+constexpr std::uint32_t kCurrentRevision = 0;
+constexpr std::int32_t kNoBubble = -1;
+/** Process-private HMAC key width used only for run-local diagnostic correlation. */
+constexpr std::size_t kFingerprintKeySize = 32;
+/** Domain prefix keeps this diagnostic use separate from protocol authentication. */
+constexpr std::array<std::byte, 4> kFingerprintDomain{
+    std::byte{'A'}, std::byte{'H'}, std::byte{'I'}, std::byte{'1'}};
+
+/** One process-private key, unavailable when system entropy failed. */
+struct FingerprintKey final {
+    std::array<std::byte, kFingerprintKeySize> bytes{};
+    bool available{};
+};
+
+/** One non-reversible, run-local body correlation value. */
+struct Fingerprint final {
+    std::uint64_t value{};
+    bool present{};
+};
+
+/** @return Process-private fingerprint key, initialized once from Windows system entropy. */
+[[nodiscard]] const FingerprintKey& fingerprint_key() noexcept {
+    static const FingerprintKey key = []() noexcept {
+        FingerprintKey value{};
+        value.available = middleware::crypto::random::fill(value.bytes);
+        return value;
+    }();
+    return key;
+}
+
+/** @return Keyed, run-local correlation value without retaining the borrowed payload. */
+[[nodiscard]] Fingerprint payload_fingerprint(std::uint32_t messageType,
+                                              std::span<const std::byte> payload) noexcept {
+    const FingerprintKey& key = fingerprint_key();
+    if (!key.available) {
+        return {};
+    }
+    std::array<std::byte, kFingerprintDomain.size() + middleware::encoding::kU32Size> domain{};
+    std::copy(kFingerprintDomain.begin(), kFingerprintDomain.end(), domain.begin());
+    middleware::encoding::write_u32_be(
+        std::span(domain).subspan<kFingerprintDomain.size(), middleware::encoding::kU32Size>(),
+        messageType);
+    middleware::crypto::hmac::Digest digest{};
+    if (!middleware::crypto::hmac::authenticate(
+            middleware::crypto::hmac::Algorithm::sha256, key.bytes, domain, payload, digest)
+        || digest.size < middleware::encoding::kU64Size) {
+        return {};
+    }
+    Fingerprint result{};
+    result.value = middleware::encoding::read_u64_be(
+        std::span(digest.bytes).first<middleware::encoding::kU64Size>());
+    result.present = true;
+    return result;
+}
 
 /**
  * Reports one inbound activity message, whatever the route goes on to do with it.
@@ -61,63 +103,13 @@ void report_arrival(const service::Request& request) noexcept {
                                       line.size(),
                                       "ev=activity stage=inbound type=%u handle=0x%llX bytes=%zu",
                                       request.messageType,
-                                      static_cast<unsigned long long>(request.accountHandle),
+                                      static_cast<unsigned long long>(request.sessionId),
                                       request.payload.size());
     if (written > 0) {
         core::log::write(core::log::Channel::server,
                          core::log::Level::debug,
                          {line.data(), static_cast<std::size_t>(written)});
     }
-}
-
-/**
- * Reports one activity message the route did not stage, naming its type.
- * Every inbound activity message is one-way, so nothing here can jam the client's reply ring. An
- * unnamed drop is invisible, and membership waits on the identity message.
- * @param messageType Activity message type from the envelope.
- * @param accountHandle Handle the envelope carried.
- * @param reason Short name of the step that declined.
- */
-void report_message(std::uint32_t messageType,
-                    std::uint64_t accountHandle,
-                    const char* reason) noexcept {
-    std::array<char, core::log::kLineCapacity> line{};
-    const int written = std::snprintf(line.data(),
-                                      line.size(),
-                                      "ev=activity stage=message result=skip type=%u "
-                                      "handle=0x%llX reason=%s",
-                                      messageType,
-                                      static_cast<unsigned long long>(accountHandle),
-                                      reason);
-    if (written > 0) {
-        core::log::write(core::log::Channel::server,
-                         core::log::Level::warn,
-                         {line.data(), static_cast<std::size_t>(written)});
-    }
-}
-
-/**
- * Records one arrival against the message type's receipt row.
- * Every routed message calls this, so a type that arrives and changes nothing is still counted.
- * @param request Validated envelope.
- * @param verdict How completely the body was framed.
- * @param consumedBits Bits the parser used, or zero when the type has no parser.
- */
-void record(const service::Request& request,
-            store::Verdict verdict,
-            std::size_t consumedBits) noexcept {
-    if (!core::settings::get().server.activation.activityCompatibilityMirror) {
-        // Off, the framing still runs and still reports; only the retained arrival is skipped.
-        return;
-    }
-    store::Arrival arrival{};
-    arrival.sessionId = request.accountHandle;
-    arrival.messageType = request.messageType;
-    arrival.payloadBytes = static_cast<std::uint32_t>(request.payload.size());
-    arrival.peerHeardMask = request.peerHeardMask;
-    arrival.consumedBits = static_cast<std::uint32_t>(consumedBits);
-    arrival.verdict = verdict;
-    static_cast<void>(store::record(arrival));
 }
 
 /** Tests whether a retained link binding still names its exact State and host generations. */
@@ -153,7 +145,7 @@ void record(const service::Request& request,
  */
 [[nodiscard]] bool owns_session(const ActivityClientBinding& binding,
                                 const service::Request& request) noexcept {
-    return binding_is_current(binding) && request.accountHandle == binding.session.sessionId;
+    return binding_is_current(binding) && request.sessionId == binding.session.sessionId;
 }
 
 /**
@@ -168,12 +160,22 @@ void record(const service::Request& request,
                                 ActivityPlan& plan) noexcept {
     service::JoinRequest parsed;
     if (!service::join_request::parse_join_request(request.payload, parsed)
-        || parsed.sessionId != request.accountHandle) {
+        || parsed.sessionId != request.sessionId) {
         return false;
     }
     if (binding_is_current(binding) && parsed.sessionId == binding.session.sessionId) {
         plan.bindingIntent = BindingIntent::preserveCurrent;
         plan.targetBinding = binding.session;
+        // The join burst carries the membership body, so its logical host must already be ready.
+        // Private activities use one stable Bubble Host. Public regions use their citizen host.
+        const std::int32_t arrival = push::activity::effective_region(binding.session).index;
+        if (push::activity::private_region(binding.session, binding.bindingGeneration, arrival)) {
+            if (!server::gameplay::complete_private_host_session(binding.session, arrival)) {
+                return false;
+            }
+        } else {
+            server::gameplay::complete_host_session(binding.session, arrival);
+        }
     } else if (server::gameplay::group::host_session_for_activity(parsed.sessionId, plan.publicHost)
                && state::activity::binding_matches(plan.publicHost.target)) {
         plan.bindingIntent = BindingIntent::publicTarget;
@@ -195,11 +197,31 @@ void record(const service::Request& request,
     plan.joinCharacterSoid = parsed.characterSoid;
     plan.delivery = Delivery::joinNotifications;
     plan.mutationDomain = MutationDomain::entitySlots;
+    // Read, never committed: the domain above is what the commit acts on, so this cannot move the
+    // private session's membership revision. The body is that session's member table, sent
+    // verbatim, because only it names a member the client recognises as the local player.
+    if (plan.bindingIntent == BindingIntent::publicTarget
+        && state::activity::binding_matches(plan.publicHost.source)) {
+        static_cast<void>(
+            state::activity::membership::prepare_refresh(plan.publicHost.source.sessionId,
+                                                         kCurrentRevision,
+                                                         kNoBubble,
+                                                         plan.membershipMutation));
+    } else if (plan.bindingIntent == BindingIntent::preserveCurrent) {
+        // A private join's burst carries the seed membership; the commit lands the same seed.
+        static_cast<void>(
+            push::activity::prepare_join_seed_snapshot(plan.targetBinding.createdRevision,
+                                                       parsed.memberKey,
+                                                       parsed.characterSoid,
+                                                       plan.membershipMutation));
+    }
     return true;
 }
 
 /**
  * Prepares only currently free slots for one positive client request.
+ * The grant is exactly what the client asked for. An ask above the slot count degrades to every
+ * remaining free slot.
  * @param request Validated owned svc8 envelope.
  * @param plan Cleared, then receives the chosen lease mask.
  * @return True for a valid positive request, including an exhausted zero-mask grant.
@@ -209,10 +231,11 @@ void record(const service::Request& request,
     if (!service::entity_slot_request::parse_entity_slot_request(request.payload, requested)
         || requested <= 0
         || !state::activity::entity_slots::prepare_grant(
-            request.accountHandle, static_cast<std::size_t>(requested), plan.entitySlotMutation)) {
+            request.sessionId, static_cast<std::size_t>(requested), plan.entitySlotMutation)) {
         return false;
     }
-    plan.sessionId = request.accountHandle;
+    plan.sessionId = request.sessionId;
+    plan.entitySlotsRequested.requestedCount = requested;
     plan.delivery = Delivery::entitySlotNotification;
     plan.mutationDomain = MutationDomain::entitySlots;
     return true;
@@ -232,78 +255,114 @@ void record(const service::Request& request,
     state::activity::entity_slots::LeaseMask returned{};
     std::copy(decoded.begin(), decoded.end(), returned.begin());
     if (!state::activity::entity_slots::prepare_release(
-            request.accountHandle, returned, plan.entitySlotMutation)) {
+            request.sessionId, returned, plan.entitySlotMutation)) {
         return false;
     }
-    plan.sessionId = request.accountHandle;
+    plan.returnedEntitySlots = decoded;
+    plan.hasReturnedEntitySlots = true;
+    plan.sessionId = request.sessionId;
     plan.delivery = Delivery::none;
     plan.mutationDomain = MutationDomain::entitySlots;
     return true;
 }
 
-/** One framing-only message type and the handler that reads its body. */
-struct FramingRoute {
-    std::uint32_t type;
-    receipts::Framed (*frame)(const service::Request&) noexcept;
-};
-
-/** Frames one abandon, which trails a reason after the mask. */
-[[nodiscard]] receipts::Framed frame_abandon(const service::Request& request) noexcept {
-    return receipts::frame_authority_release(request, true);
-}
-
-/** Frames one abdicate, which carries no reason. */
-[[nodiscard]] receipts::Framed frame_abdicate(const service::Request& request) noexcept {
-    return receipts::frame_authority_release(request, false);
-}
-
-/** Every message type this route frames and records without changing State. */
-constexpr std::array<FramingRoute, 22> kFramingRoutes{{
-    {service::sense_update::kMessageType, receipts::frame_sense_update},
-    {kLocalActivityHostMessageType, receipts::frame_route_misuse},
-    {telemetry::kReservationRequestType, receipts::frame_reservation_request},
-    {ledger::kReleaseReservationType, receipts::frame_reservation_release},
-    {ledger::kPeerLeaveType, receipts::frame_peer_leave},
-    {client_keepalive::kMessageType, receipts::frame_client_keepalive},
-    {service::incident::kMessageType, receipts::frame_incident},
-    {authority::kAbandonMessageType, frame_abandon},
-    {authority::kAbdicateMessageType, frame_abdicate},
-    {authority::kRequestPurgeMessageType, receipts::frame_request_purge},
-    {authority::kResetAcknowledgementMessageType, receipts::frame_query_answer},
-    {authority::kQueryPerBubbleMessageType, receipts::frame_query_answer},
-    {authority::kQueryResponseMessageType, receipts::frame_query_answer},
-    {telemetry::kDebugCommandType, receipts::frame_debug_command},
-    {ledger::kConnectivityFailureType, receipts::frame_connectivity_failure},
-    {telemetry::kHeartbeatType, receipts::frame_heartbeat},
-    {telemetry::kBugClawType, receipts::frame_opaque_scalar},
-    {telemetry::kRefreshInspirationsType, receipts::frame_opaque_scalar},
-    {telemetry::kLagSwitchType, receipts::frame_lag_switch},
-    {telemetry::kConnectionQualityType, receipts::frame_connection_quality},
-    {ledger::kSpeculativeMigrationType, receipts::frame_migration},
-    {high_water::kMessageType, receipts::frame_high_water},
-}};
-
-/**
- * Frames one message that changes no State and records its receipt.
- * @param request Validated envelope.
- * @return Always true: a framing-only message can never fail the transport frame.
- */
-[[nodiscard]] bool frame_only(const service::Request& request) noexcept {
-    const auto row = std::find_if(kFramingRoutes.begin(),
-                                  kFramingRoutes.end(),
-                                  [&request](const FramingRoute& candidate) noexcept {
-                                      return candidate.type == request.messageType;
-                                  });
-    const receipts::Framed framed =
-        row != kFramingRoutes.end() ? row->frame(request) : receipts::frame_unknown(request);
-    record(request, framed.verdict, framed.consumedBits);
-    return true;
-}
-
 } // namespace
+
+/** Reports one activity message the route did not stage, naming its type. */
+void report_message(std::uint32_t messageType,
+                    std::uint64_t sessionId,
+                    const char* reason) noexcept {
+    std::array<char, core::log::kLineCapacity> line{};
+    const int written = std::snprintf(line.data(),
+                                      line.size(),
+                                      "ev=activity stage=message result=skip type=%u "
+                                      "handle=0x%llX reason=%s",
+                                      messageType,
+                                      static_cast<unsigned long long>(sessionId),
+                                      reason);
+    if (written > 0) {
+        core::log::write(core::log::Channel::server,
+                         core::log::Level::warn,
+                         {line.data(), static_cast<std::size_t>(written)});
+    }
+}
+
+/** Maps one framing-only parser result onto a diagnostic body status. */
+server::activity::host::ClientMessageStatus diagnostic_status(const receipts::Framed& framed,
+                                                              bool incident) noexcept {
+    using Status = server::activity::host::ClientMessageStatus;
+    switch (framed.verdict) {
+    case store::Verdict::framed:
+        return incident ? Status::outerDecoded : Status::decoded;
+    case store::Verdict::partial:
+        return framed.consumedBits == 0 ? Status::opaque : Status::prefixOnly;
+    case store::Verdict::malformed:
+        return Status::malformed;
+    case store::Verdict::quarantined:
+        return Status::quarantined;
+    case store::Verdict::absent:
+    case store::Verdict::unowned:
+        return Status::unclassified;
+    }
+    return Status::unclassified;
+}
+
+/** Records one arrival in the aggregate receipts and the owned diagnostic history. */
+std::uint64_t record(const service::Request& request,
+                     store::Verdict receiptVerdict,
+                     std::size_t receiptConsumedBits,
+                     const state::activity::SessionBinding* ownedBinding,
+                     std::uint64_t sourceGeneration,
+                     const DiagnosticBody& diagnostic,
+                     bool zeroHandleOwned) noexcept {
+    std::uint64_t sequence = 0;
+    const bool exactEnvelopeOwner =
+        ownedBinding != nullptr && ownedBinding->sessionId == request.sessionId;
+    const bool exactZeroHandleOwner =
+        ownedBinding != nullptr && zeroHandleOwned && request.sessionId == 0;
+    if (exactEnvelopeOwner || exactZeroHandleOwner) {
+        const Fingerprint fingerprint = payload_fingerprint(request.messageType, request.payload);
+        server::activity::host::ClientMessageInput input{};
+        input.binding = *ownedBinding;
+        input.sourceGeneration = sourceGeneration;
+        input.payloadFingerprint = fingerprint.value;
+        input.messageType = request.messageType;
+        input.payloadBytes = static_cast<std::uint32_t>(request.payload.size());
+        input.peerHeardMask = request.peerHeardMask;
+        input.consumedBits = static_cast<std::uint32_t>(diagnostic.consumedBits);
+        input.status = diagnostic.status;
+        input.hasPayloadFingerprint = fingerprint.present;
+        if (diagnostic.authoritative != nullptr) {
+            input.authoritative = *diagnostic.authoritative;
+            input.hasAuthoritative = true;
+        }
+        communication::ActivityCommunicationRoute route{};
+        const bool executableRoute =
+            activity_sdk::executable_communication_route(request.messageType, route);
+        // Message handlers parse their own authored native body. Routing retains no parallel
+        // schema-driven scalar decode.
+        sequence = server::activity::host::record_client_message(input, diagnostic.sense);
+        if (sequence != 0 && request.messageType != service::entity_slot_request::kMessageType
+            && executableRoute
+            && route.ingressDelivery == communication::IngressDeliveryPolicy::protocolHostInput
+            && !server::activity::host::submit_client_message(input, sequence)) {
+            report_message(request.messageType, request.sessionId, "mission_ingress_refused");
+        }
+    }
+    store::Arrival arrival{};
+    arrival.sessionId = request.sessionId;
+    arrival.messageType = request.messageType;
+    arrival.payloadBytes = static_cast<std::uint32_t>(request.payload.size());
+    arrival.peerHeardMask = request.peerHeardMask;
+    arrival.consumedBits = static_cast<std::uint32_t>(receiptConsumedBits);
+    arrival.verdict = receiptVerdict;
+    static_cast<void>(store::record(arrival));
+    return sequence;
+}
 
 /** Routes one svc8 activity message and prepares any supported push transaction. */
 bool process(const ActivityClientBinding& binding,
+             const RosterDecodeMap& rosterDecode,
              std::span<const std::byte> requestBody,
              ActivityPlan& plan,
              bool& hasTransaction) noexcept {
@@ -316,56 +375,144 @@ bool process(const ActivityClientBinding& binding,
         return false;
     }
     report_arrival(request);
-    // Join acquires or preserves an exact binding. Every other message, including type 52 and the
-    // receipt-only types, must name the exact session already owned by this link before it can
-    // mutate State or the receipt registry.
-    const std::uint32_t messageType = request.messageType;
+    communication::ActivityCommunicationRoute route{};
+    const bool executableRoute =
+        activity_sdk::executable_communication_route(request.messageType, route);
+    const IngressAdapter adapter = executableRoute ? route.ingressAdapter : IngressAdapter::none;
+    // Join acquires a binding. Msg52 may name the current binding or use its zero-handle form.
+    const bool acquiresBinding = adapter == IngressAdapter::joinRequestStateJoin;
+    const bool zeroHandlePatchEpoch = adapter == IngressAdapter::patchEpochStateEpoch;
+    const bool currentOwnsEnvelope = owns_session(binding, request);
     const bool ownsMessage =
-        messageType == kJoinRequestMessageType || owns_session(binding, request);
+        acquiresBinding
+        || (zeroHandlePatchEpoch
+                ? currentOwnsEnvelope || (binding_is_current(binding) && request.sessionId == 0)
+                : currentOwnsEnvelope);
     if (!ownsMessage) {
-        report_message(request.messageType, request.accountHandle, "unowned");
-        record(request, store::Verdict::unowned, 0);
+        report_message(request.messageType, request.sessionId, "unowned");
+        static_cast<void>(record(request, store::Verdict::unowned, 0, nullptr, 0));
         return true;
     }
     bool prepared = false;
-    if (request.messageType == epoch_message::kMessageType) {
-        prepared = patch_epoch::prepare(request.accountHandle, request, plan);
-    } else if (request.messageType == kJoinRequestMessageType) {
+    switch (adapter) {
+    case IngressAdapter::patchEpochStateEpoch:
+        prepared = patch_epoch::prepare(binding.session.sessionId, request, plan);
+        break;
+    case IngressAdapter::joinRequestStateJoin:
         prepared = prepare_join(binding, request, plan);
-    } else if (request.messageType == service::entity_slot_request::kMessageType) {
+        break;
+    case IngressAdapter::entitySlotRequestStateSlots:
         prepared = prepare_grant(request, plan);
-    } else if (request.messageType == service::entity_slots::kRequestMessageType) {
+        break;
+    case IngressAdapter::entitySlotsStateSlots:
         prepared = prepare_release(request, plan);
-    } else if (request.messageType == service::state_refresh::kMessageType) {
+        break;
+    case IngressAdapter::stateRefreshMembership:
         prepared = membership::prepare_refresh(request, plan);
-    } else if (request.messageType == service::client_identity::kMessageType) {
+        break;
+    case IngressAdapter::clientIdentityMembership:
         prepared = membership::prepare_identity(request, plan);
-    } else if (request.messageType == service::client_authoritative_data::kMessageType) {
+        break;
+    case IngressAdapter::clientAuthoritativeDataMembership:
         prepared = membership::prepare_authoritative(request, plan);
-    } else if (request.messageType == service::membership_acknowledgement::kMessageType) {
+        break;
+    case IngressAdapter::membershipAcknowledgement:
         prepared = membership::prepare_acknowledgement(request, plan);
-    } else if (request.messageType == service::start_activity::kMessageType) {
+        break;
+    case IngressAdapter::startActivityOptionalStateRefresh:
         // Off, the request is framed and recorded but no transition policy runs on it.
         if (!core::settings::get().server.activation.defaultClientActivation) {
             const receipts::Framed framed = receipts::frame_start_activity(request);
-            record(request, framed.verdict, framed.consumedBits);
+            DiagnosticBody diagnostic{};
+            diagnostic.consumedBits = framed.consumedBits;
+            diagnostic.status = diagnostic_status(framed, false);
+            static_cast<void>(record(request,
+                                     framed.verdict,
+                                     framed.consumedBits,
+                                     &binding.session,
+                                     binding.bindingGeneration,
+                                     diagnostic));
             return true;
         }
         prepared = membership::prepare_start_activity(request, plan);
-    } else {
-        return frame_only(request);
+        break;
+    case IngressAdapter::authorityResetAcknowledgement:
+        return prepare_authority_reset_acknowledgement(
+            binding, rosterDecode, adapter, request, plan, hasTransaction);
+    case IngressAdapter::authorityAbdicate:
+        return prepare_authority_abdication(
+            binding, rosterDecode, adapter, request, plan, hasTransaction);
+    case IngressAdapter::authorityRequestPurge:
+        return prepare_authority_purge(
+            binding, rosterDecode, adapter, request, plan, hasTransaction);
+    case IngressAdapter::authorityQueryAnswer:
+        return prepare_authority_query_answer(
+            binding, rosterDecode, adapter, request, plan, hasTransaction);
+    default:
+        return frame_only(binding, rosterDecode, adapter, request);
     }
     // A message that cannot be staged is reported and dropped. Failing the frame would leave the
     // client's pending ring jammed.
     if (!prepared) {
-        report_message(request.messageType, request.accountHandle, "prepare");
-        record(request, store::Verdict::malformed, 0);
+        report_message(request.messageType, request.sessionId, "prepare");
+        const state::activity::SessionBinding* const ownedBinding =
+            acquiresBinding && !currentOwnsEnvelope ? nullptr : &binding.session;
+        DiagnosticBody diagnostic{};
+        diagnostic.status = server::activity::host::ClientMessageStatus::prepareRefused;
+        static_cast<void>(record(request,
+                                 store::Verdict::malformed,
+                                 0,
+                                 ownedBinding,
+                                 binding.bindingGeneration,
+                                 diagnostic,
+                                 zeroHandlePatchEpoch));
         plan = {};
         return true;
     }
-    record(request,
-           store::Verdict::framed,
-           request.payload.size() * middleware::encoding::kBitsPerByte);
+    if (adapter == IngressAdapter::joinRequestStateJoin) {
+        const std::size_t consumedBits =
+            request.payload.size() * middleware::encoding::kBitsPerByte;
+        const Fingerprint fingerprint = payload_fingerprint(request.messageType, request.payload);
+        plan.joinIngress.payloadFingerprint = fingerprint.value;
+        plan.joinIngress.payloadBytes = static_cast<std::uint32_t>(request.payload.size());
+        plan.joinIngress.peerHeardMask = request.peerHeardMask;
+        plan.joinIngress.consumedBits = static_cast<std::uint32_t>(consumedBits);
+        plan.joinIngress.hasPayloadFingerprint = fingerprint.present;
+        plan.joinIngress.prepared = true;
+        static_cast<void>(record(request, store::Verdict::framed, consumedBits, nullptr, 0));
+        hasTransaction = true;
+        return true;
+    }
+    const state::activity::SessionBinding& ownedBinding = binding.session;
+    DiagnosticBody diagnostic{};
+    diagnostic.status = server::activity::host::ClientMessageStatus::prepared;
+    const bool publishesClientState = adapter == IngressAdapter::clientAuthoritativeDataMembership;
+    if (publishesClientState) {
+        diagnostic.authoritative = &plan.membershipMutation.authoritativeInput;
+        diagnostic.consumedBits = request.payload.size() * middleware::encoding::kBitsPerByte;
+        diagnostic.status = server::activity::host::ClientMessageStatus::decoded;
+    }
+    const std::uint64_t clientMessageSequence =
+        record(request,
+               store::Verdict::framed,
+               request.payload.size() * middleware::encoding::kBitsPerByte,
+               &ownedBinding,
+               binding.bindingGeneration,
+               diagnostic,
+               zeroHandlePatchEpoch);
+    if (adapter == IngressAdapter::entitySlotRequestStateSlots && clientMessageSequence != 0) {
+        plan.entitySlotsRequested.binding = ownedBinding;
+        plan.entitySlotsRequested.sourceGeneration = binding.bindingGeneration;
+        plan.entitySlotsRequested.clientMessageSequence = clientMessageSequence;
+        plan.entitySlotsRequested.pending = true;
+    }
+    if (publishesClientState && clientMessageSequence != 0) {
+        plan.clientState.binding = ownedBinding;
+        plan.clientState.sourceGeneration = binding.bindingGeneration;
+        plan.clientState.clientMessageSequence = clientMessageSequence;
+        plan.clientState.payloadBytes = static_cast<std::uint32_t>(request.payload.size());
+        plan.clientState.pending = true;
+    }
     hasTransaction = true;
     return true;
 }
