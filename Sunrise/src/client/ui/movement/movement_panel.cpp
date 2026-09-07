@@ -31,8 +31,6 @@ constexpr std::size_t kKeyNameCapacity = 64;
 enum class CaptureTarget {
     none,
     teleport,
-    noclip,
-    fly,
 };
 
 CaptureTarget g_capturing{CaptureTarget::none};
@@ -168,58 +166,6 @@ void draw() noexcept {
     ImGui::SameLine(labelWidth);
     changed = key_picker("teleport_key", CaptureTarget::teleport, settings.virtualKey, controlWidth)
               || changed;
-
-    ImGui::Spacing();
-    ImGui::Spacing();
-    ImGui::TextUnformatted("Noclip");
-    ImGui::Separator();
-    ImGui::TextWrapped("Disable collision on the horizontal axis.");
-    ImGui::Spacing();
-
-    changed =
-        core::ui::components::toggle::control("Enabled##noclip", settings.noclipEnabled) || changed;
-
-    ImGui::Spacing();
-    ImGui::AlignTextToFramePadding();
-    label::align();
-    ImGui::TextUnformatted("Toggle key");
-    ImGui::SameLine(labelWidth);
-    changed =
-        key_picker("noclip_key", CaptureTarget::noclip, settings.noclipToggleKey, controlWidth)
-        || changed;
-
-    ImGui::Spacing();
-    ImGui::Spacing();
-    ImGui::TextUnformatted("Fly");
-    ImGui::Separator();
-    ImGui::TextWrapped("Fly with your movement keys.");
-    ImGui::Spacing();
-
-    changed = core::ui::components::toggle::control("Enabled##fly", settings.flyEnabled) || changed;
-
-    ImGui::Spacing();
-    ImGui::AlignTextToFramePadding();
-    label::align();
-    ImGui::TextUnformatted("Toggle key");
-    ImGui::SameLine(labelWidth);
-    changed =
-        key_picker("fly_key", CaptureTarget::fly, settings.flyToggleKey, controlWidth) || changed;
-
-    ImGui::Spacing();
-    ImGui::AlignTextToFramePadding();
-    label::align();
-    ImGui::TextUnformatted("Speed");
-    ImGui::SameLine(labelWidth);
-    ImGui::SetNextItemWidth(controlWidth);
-    float flySpeed = settings.flySpeed;
-    if (ImGui::SliderFloat("##fly_speed",
-                           &flySpeed,
-                           client::movement::kMinimumFlySpeed,
-                           client::movement::kMaximumFlySpeed,
-                           "%.0f units/s")) {
-        settings.flySpeed = flySpeed;
-        changed = true;
-    }
 
     ImGui::Spacing();
     ImGui::Spacing();

@@ -38,10 +38,7 @@ bool g_pathResolved{};
 /** @param settings Candidate configuration. @return True when every field is in range. */
 [[nodiscard]] bool valid(const Settings& settings) noexcept {
     return settings.distance >= kMinimumDistance && settings.distance <= kMaximumDistance
-           && settings.virtualKey <= kMaximumVirtualKey
-           && settings.noclipToggleKey <= kMaximumVirtualKey
-           && settings.flyToggleKey <= kMaximumVirtualKey && settings.flySpeed >= kMinimumFlySpeed
-           && settings.flySpeed <= kMaximumFlySpeed;
+           && settings.virtualKey <= kMaximumVirtualKey;
 }
 
 /** @param reason Key naming the step that failed. */
@@ -122,27 +119,8 @@ void parse(std::string_view text, Settings& output) noexcept {
     if (scalar_for(text, "\"virtual_key\"", scalar) && terminated(scalar, buffer)) {
         output.virtualKey = static_cast<std::uint32_t>(std::strtoul(buffer.data(), nullptr, 0));
     }
-    if (scalar_for(text, "\"noclip_enabled\"", scalar)) {
-        output.noclipEnabled = scalar.starts_with("true");
-    }
-    if (scalar_for(text, "\"noclip_toggle_key\"", scalar) && terminated(scalar, buffer)) {
-        output.noclipToggleKey =
-            static_cast<std::uint32_t>(std::strtoul(buffer.data(), nullptr, 0));
-    }
     if (scalar_for(text, "\"sword_skate_enabled\"", scalar)) {
         output.swordSkateEnabled = scalar.starts_with("true");
-    }
-    if (scalar_for(text, "\"fly_enabled\"", scalar)) {
-        output.flyEnabled = scalar.starts_with("true");
-    }
-    if (scalar_for(text, "\"fly_toggle_key\"", scalar) && terminated(scalar, buffer)) {
-        output.flyToggleKey = static_cast<std::uint32_t>(std::strtoul(buffer.data(), nullptr, 0));
-    }
-    if (scalar_for(text, "\"fly_speed\"", scalar) && terminated(scalar, buffer)) {
-        // Clamped, not refused. A speed saved before the maximum came down would otherwise fail
-        // the range check and take every other movement setting with it.
-        output.flySpeed =
-            std::clamp(std::strtof(buffer.data(), nullptr), kMinimumFlySpeed, kMaximumFlySpeed);
     }
 }
 
@@ -161,21 +139,11 @@ void parse(std::string_view text, Settings& output) noexcept {
                                    document.size(),
                                    "{\n  \"enabled\": %s,\n  \"distance\": %.3f,\n"
                                    "  \"virtual_key\": %u,\n"
-                                   "  \"noclip_enabled\": %s,\n"
-                                   "  \"noclip_toggle_key\": %u,\n"
-                                   "  \"sword_skate_enabled\": %s,\n"
-                                   "  \"fly_enabled\": %s,\n"
-                                   "  \"fly_toggle_key\": %u,\n"
-                                   "  \"fly_speed\": %.3f\n}\n",
+                                   "  \"sword_skate_enabled\": %s\n}\n",
                                    settings.enabled ? "true" : "false",
                                    static_cast<double>(settings.distance),
                                    static_cast<unsigned>(settings.virtualKey),
-                                   settings.noclipEnabled ? "true" : "false",
-                                   static_cast<unsigned>(settings.noclipToggleKey),
-                                   settings.swordSkateEnabled ? "true" : "false",
-                                   settings.flyEnabled ? "true" : "false",
-                                   static_cast<unsigned>(settings.flyToggleKey),
-                                   static_cast<double>(settings.flySpeed));
+                                   settings.swordSkateEnabled ? "true" : "false");
     if (size <= 0) {
         return false;
     }

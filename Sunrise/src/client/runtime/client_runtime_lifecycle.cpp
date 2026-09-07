@@ -16,10 +16,8 @@
 #include "../hooks/graphics/graphics_hook_lifecycle.h"
 #include "../hooks/hitch_probe/hitch_probe.h"
 #include "../hooks/inactivity/inactivity_override.h"
-#include "../hooks/infinite_ammo/infinite_ammo.h"
 #include "../hooks/membership_probe/membership_probe.h"
 #include "../hooks/network/runtime.h"
-#include "../hooks/noclip/runtime.h"
 #include "../hooks/package_trust/package_trust_bypass.h"
 #include "../hooks/polled_input/runtime.h"
 #include "../hooks/queuez/queuez_hook_lifecycle.h"
@@ -138,9 +136,7 @@ bool shutdown() noexcept {
     }
     hooks::bitmap::uninstall();
     hooks::bootflow::uninstall();
-    hooks::infinite_ammo::uninstall();
     hooks::inactivity::uninstall();
-    hooks::noclip::uninstall();
     hooks::teleport::uninstall();
     hooks::queuez::uninstall();
     if (!hooks::config_getter::uninstall()) {

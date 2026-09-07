@@ -21,6 +21,7 @@
   <PropertyGroup Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
     <PlatformToolset>v145</PlatformToolset>
+    <PreferredToolArchitecture>x64</PreferredToolArchitecture>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)'=='Debug'" Label="Configuration">
@@ -244,10 +245,8 @@
     <ClCompile Include="src\client\ui\player\player_panel.cpp" />
     <ClCompile Include="src\client\player\player_position.cpp" />
     <ClCompile Include="src\client\player\player_settings_store.cpp" />
-    <ClCompile Include="src\client\hooks\noclip\horizontal_noclip.cpp" />
-    <ClCompile Include="src\client\hooks\sword_skate\sword_skate.cpp" />
-    <ClCompile Include="src\client\hooks\fly\fly.cpp" />
     <ClCompile Include="src\client\hooks\infinite_ammo\infinite_ammo.cpp" />
+    <ClCompile Include="src\client\hooks\sword_skate\sword_skate.cpp" />
     <ClCompile Include="src\client\input\window_focus.cpp" />
     <ClCompile Include="src\client\hooks\teleport\teleport_lifecycle.cpp" />
     <ClCompile Include="src\client\hooks\vendor_banner\vendor_banner_retire.cpp" />
@@ -1326,10 +1325,8 @@
     <ClInclude Include="src\client\ui\player\player_panel.h" />
     <ClInclude Include="src\client\player\player_position.h" />
     <ClInclude Include="src\client\player\player_settings_store.h" />
-    <ClInclude Include="src\client\hooks\noclip\runtime.h" />
-    <ClInclude Include="src\client\hooks\sword_skate\sword_skate.h" />
-    <ClInclude Include="src\client\hooks\fly\fly.h" />
     <ClInclude Include="src\client\hooks\infinite_ammo\infinite_ammo.h" />
+    <ClInclude Include="src\client\hooks\sword_skate\sword_skate.h" />
     <ClInclude Include="src\client\input\window_focus.h" />
     <ClInclude Include="src\client\hooks\teleport\internal.h" />
     <ClInclude Include="src\client\hooks\vendor_banner\vendor_banner_retire.h" />

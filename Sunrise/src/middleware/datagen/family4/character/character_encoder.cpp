@@ -11,7 +11,7 @@
 #include "../../../../core/logging/log.h"
 #include "../../../../state/build_data/runtime.h"
 #include "../../../../state/unlocks/unlocks_records.h"
-#include "../../../unlocks/unlocks_runtime.h"
+#include "../../../../state/unlocks/unlocks_runtime.h"
 #include "../../character_record/layout.h"
 #include "../instance/layout.h"
 #include "../progression/progression_bank_keys.h"

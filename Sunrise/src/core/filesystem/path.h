@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstddef>
+#include <span>
 #include <string_view>
 
 namespace sunrise::core::path {
@@ -36,5 +37,8 @@ struct Buffer {
 
 /** Appends one suffix without exceeding fixed path storage. */
 [[nodiscard]] bool append(Buffer& path, std::wstring_view suffix) noexcept;
+
+/** Reads one Sunrise-owned text file whole, into caller storage, terminated. */
+[[nodiscard]] bool read_artifact_text(std::wstring_view relative, std::span<char> text) noexcept;
 
 } // namespace sunrise::core::path

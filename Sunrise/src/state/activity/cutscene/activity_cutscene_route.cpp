@@ -105,7 +105,7 @@ bool apply(defaults::ActivityDefaults& defaults) noexcept {
     selection.packageNameLength = static_cast<std::uint8_t>(kOpeningCutscene.size());
     // Named rather than picked, so the indices the client would have supplied are all absent.
     selection.reason = destination::kMinimumReason;
-    selection.previousActivityIndex = destination::kAbsentActivityIndex;
+    selection.sourceActivityIndex = destination::kAbsentActivityIndex;
     selection.activityIndex = destination::kAbsentActivityIndex;
     selection.elementIndex = destination::kAbsentElementIndex;
     selection.arrivalBubbleOverride = kArrivalBubble;

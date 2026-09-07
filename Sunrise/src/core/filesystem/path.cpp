@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <span>
 
 namespace sunrise::core::path {
 namespace {

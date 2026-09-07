@@ -13,7 +13,7 @@ namespace {
 /** Namespaced stable IDs prevent Client modules from colliding with Server modules. */
 constexpr std::string_view kMovementStableId = "client.movement";
 constexpr std::string_view kPlayerStableId = "client.player";
-/** Short menu label for the shared teleport and noclip page. */
+/** Short menu label for the movement page. */
 constexpr std::string_view kMovementDisplayName = "Movement";
 /** Short menu label for the player page. */
 constexpr std::string_view kPlayerDisplayName = "Player";

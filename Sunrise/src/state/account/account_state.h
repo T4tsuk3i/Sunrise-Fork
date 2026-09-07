@@ -142,6 +142,8 @@ struct CharacterState {
     CharacterClass characterClass{CharacterClass::titan};
     std::uint8_t level{};
     bool previewAvailable{};
+    /** Settings-authored template the roster copied onto this slot, or its acceptance reset. */
+    bool accepted{};
     /** Authored scalar kept for the family-specific character presentation encoders. */
     float appearanceValue{};
     /** Compact default destination hash used until a later runtime selection replaces it. */
