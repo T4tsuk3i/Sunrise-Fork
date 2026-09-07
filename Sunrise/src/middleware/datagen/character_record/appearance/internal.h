@@ -97,13 +97,23 @@ void apply_perk_banks(const family4::loadout::ResolvedInstances& instances,
                       layout::Appearance& appearance) noexcept;
 
 /**
+ * Reports the completed appearance block's ability buckets, overflow bank and perk-bank fills once.
+ * Runs after every fill, so this is the exact wire content the client's ability and perk path
+ * reads, independent of what the build data declared.
+ * @param appearance Completed appearance block, all fills applied.
+ */
+void report_encoded_probe(std::uint64_t soid, const layout::Appearance& appearance) noexcept;
+
+/**
  * Fills the character stat table and the three per-weapon stat tables.
+ * @param character Character being encoded, which identifies the diagnostics' subject.
  * @param instances Resolved item instances belonging to one character.
  * @param light Equipment light, which goes in the character table's light row.
  * @param appearance Appearance block receiving the tables.
  * @return True when the installed investment constants name the rows to write.
  */
-[[nodiscard]] bool apply_stats(const family4::loadout::ResolvedInstances& instances,
+[[nodiscard]] bool apply_stats(const state::CharacterState& character,
+                               const family4::loadout::ResolvedInstances& instances,
                                std::int32_t light,
                                layout::Appearance& appearance) noexcept;
 

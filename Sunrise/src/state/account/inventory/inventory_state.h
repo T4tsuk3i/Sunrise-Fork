@@ -36,6 +36,15 @@ inline constexpr std::size_t kPlugCapacity = 12;
 /** The engine no-definition hash cannot identify an authored item or plug. */
 inline constexpr std::uint32_t kNoDefinitionHash = 0x811C9DC5U;
 
+/**
+ * Authored armor counters keep the State layer free of build-data dependencies.
+ * Zero is "unset"; positive values are one-based authoring numbers (archetype 1-6, gear tier 1-5,
+ * masterwork 1-5) so an unset item balances a one-based tier without a confusing off-by-one.
+ */
+inline constexpr std::uint8_t kArmorArchetypeNone = 6;
+inline constexpr std::uint8_t kArmorGearTierNone = 5;
+inline constexpr std::uint8_t kArmorMasterworkNone = 5;
+
 /** Says whether Middleware uses native socket defaults or authored lanes. */
 enum class SocketPolicy : std::uint8_t {
     nativeDefaults,
@@ -91,6 +100,14 @@ struct Item {
     std::int32_t mutationSerial{};
     /** Native accumulated item-state bits such as the finisher favorite marker. */
     std::uint32_t flags{};
+    /**
+     * Authored Armor 3.0 meta, kept as raw counters so this layer never depends on build data.
+     * Zero means none: no archetype, no gear tier, no masterwork and no set.
+     */
+    std::uint8_t armorArchetype{};
+    std::uint8_t armorGearTier{};
+    std::uint8_t armorMasterworkLevel{};
+    std::uint32_t armorSetHash{kNoDefinitionHash};
     Sockets sockets;
     /**
      * Selected ability-node socket entries. Only meaningful on a subclass. Kept on the item, not

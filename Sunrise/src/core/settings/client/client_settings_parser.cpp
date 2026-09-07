@@ -16,6 +16,15 @@ bool Parser::client_settings(client::Settings& output) noexcept {
     bool hasPinReplicatedRecord = false;
     bool hasHoldSpawn = false;
     bool hasSpawnHoldMs = false;
+    bool hasCharacterStatBonus = false;
+    bool hasCharacterStatRow = false;
+    bool hasCharacterStatFillValue = false;
+    bool hasCharacterStatFillFirst = false;
+    bool hasCharacterStatFillLast = false;
+    bool hasStatScanDelay = false;
+    bool hasStatScanWindow = false;
+    bool hasStatScanValues = false;
+    bool hasCharacterStatRowBonuses = false;
     if (consume('}')) {
         return true;
     }
@@ -67,6 +76,108 @@ bool Parser::client_settings(client::Settings& output) noexcept {
             }
             candidate.spawnHoldMs = value;
             hasSpawnHoldMs = true;
+        } else if (key == "character_stat_bonus") {
+            std::int64_t value = 0;
+            const auto limit = static_cast<std::int64_t>(client::kMaximumCharacterStatBonus);
+            if (hasCharacterStatBonus || !signed_integer(value) || value > limit
+                || value < -limit) {
+                return false;
+            }
+            candidate.characterStatBonus = static_cast<std::int32_t>(value);
+            hasCharacterStatBonus = true;
+        } else if (key == "character_stat_fill_value") {
+            std::int64_t value = 0;
+            const auto limit = static_cast<std::int64_t>(client::kMaximumCharacterStatBonus);
+            if (hasCharacterStatFillValue || !signed_integer(value) || value > limit
+                || value < -limit) {
+                return false;
+            }
+            candidate.characterStatFillValue = static_cast<std::int32_t>(value);
+            hasCharacterStatFillValue = true;
+        } else if (key == "character_stat_fill_first") {
+            std::int64_t value = 0;
+            if (hasCharacterStatFillFirst || !signed_integer(value) || value < 0 || value > 127) {
+                return false;
+            }
+            candidate.characterStatFillFirst = static_cast<std::int32_t>(value);
+            hasCharacterStatFillFirst = true;
+        } else if (key == "character_stat_fill_last") {
+            std::int64_t value = 0;
+            if (hasCharacterStatFillLast || !signed_integer(value) || value < 0 || value > 127) {
+                return false;
+            }
+            candidate.characterStatFillLast = static_cast<std::int32_t>(value);
+            hasCharacterStatFillLast = true;
+        } else if (key == "stat_scan_delay_ms") {
+            std::uint64_t value = 0;
+            if (hasStatScanDelay || !unsigned_integer(value)) {
+                return false;
+            }
+            candidate.statScanDelayMs = value;
+            hasStatScanDelay = true;
+        } else if (key == "stat_scan_window_bytes") {
+            std::uint64_t value = 0;
+            if (hasStatScanWindow || !unsigned_integer(value) || value == 0
+                || value > client::kMaximumStatScanWindow) {
+                return false;
+            }
+            candidate.statScanWindowBytes = value;
+            hasStatScanWindow = true;
+        } else if (key == "stat_scan_values") {
+            if (hasStatScanValues || !consume('[')) {
+                return false;
+            }
+            candidate.statScanValueCount = 0;
+            if (!consume(']')) {
+                for (;;) {
+                    std::int64_t value = 0;
+                    if (candidate.statScanValueCount >= candidate.statScanValues.size()
+                        || !signed_integer(value)) {
+                        return false;
+                    }
+                    candidate.statScanValues[candidate.statScanValueCount] =
+                        static_cast<std::int32_t>(value);
+                    ++candidate.statScanValueCount;
+                    if (consume(']')) {
+                        break;
+                    }
+                    if (!consume(',')) {
+                        return false;
+                    }
+                }
+            }
+            hasStatScanValues = true;
+        } else if (key == "character_stat_row") {
+            std::int64_t value = 0;
+            if (hasCharacterStatRow || !signed_integer(value) || value > 255 || value < -1) {
+                return false;
+            }
+            candidate.characterStatRow = static_cast<std::int32_t>(value);
+            hasCharacterStatRow = true;
+        } else if (key == "character_stat_bonus_rows") {
+            const auto limit = static_cast<std::int64_t>(client::kMaximumCharacterStatBonus);
+            if (hasCharacterStatRowBonuses || !consume('[')) {
+                return false;
+            }
+            if (consume(']')) {
+                hasCharacterStatRowBonuses = true;
+            } else {
+                for (std::size_t index = 0; index < candidate.characterStatRowBonuses.size();
+                     ++index) {
+                    std::int64_t value = 0;
+                    if (!signed_integer(value) || value > limit || value < -limit) {
+                        return false;
+                    }
+                    candidate.characterStatRowBonuses[index] = static_cast<std::int32_t>(value);
+                    if (index + 1 < candidate.characterStatRowBonuses.size() && !consume(',')) {
+                        return false;
+                    }
+                }
+                if (!consume(']')) {
+                    return false;
+                }
+                hasCharacterStatRowBonuses = true;
+            }
         } else if (!skip_value(0)) {
             return false;
         }

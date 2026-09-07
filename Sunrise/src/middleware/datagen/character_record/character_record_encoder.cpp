@@ -53,7 +53,7 @@ constexpr std::size_t kPreviewFlagOffsets[]{8, 9};
     output.unusedFloatB = static_cast<float>(light);
     output.light = static_cast<float>(light);
     const bool renderOk = appearance::apply_render(instances, character.characterClass, output);
-    const bool statsOk = renderOk && appearance::apply_stats(instances, light, output);
+    const bool statsOk = renderOk && appearance::apply_stats(character, instances, light, output);
     const bool abilitiesOk =
         statsOk && appearance::apply_ability_buckets(character, instances, output);
     if (!renderOk || !statsOk || !abilitiesOk) {
@@ -76,6 +76,11 @@ constexpr std::size_t kPreviewFlagOffsets[]{8, 9};
     // The ability buckets claim their overflow slots first; the gear hashes take what is left.
     appearance::apply_overflow_hashes(instances, output);
     appearance::apply_perk_banks(instances, output);
+    // Same subject rule as the other probes: character select encodes all three, and only the
+    // selected one is the record under test.
+    if (character.selected) {
+        appearance::report_encoded_probe(character.soid, output);
+    }
     return true;
 }
 

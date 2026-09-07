@@ -3,6 +3,7 @@
 #include "../../../../core/ui/busy/busy.h"
 #include "../../../targets/game/content.h"
 #include "../../diagnostics/content_readiness_report.h"
+#include "../../diagnostics/investment_dump.h"
 #include "../internal.h"
 #include "../runtime.h"
 #include "../worker.h"
@@ -61,6 +62,9 @@ void service(std::uint64_t nowMilliseconds) noexcept {
 
     g_complete = sunrise::client::content::investment::refresh();
     sunrise::client::content::diagnostics::report_readiness();
+    sunrise::client::content::diagnostics::dump_investment_tables();
+    sunrise::client::content::diagnostics::dump_armor_sockets();
+    sunrise::client::content::diagnostics::dump_mod_lane_pools_once();
     g_overlayPending = false;
     ReleaseSRWLockExclusive(&g_lifecycleLock);
 }

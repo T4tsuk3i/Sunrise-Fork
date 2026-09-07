@@ -1,5 +1,8 @@
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
 
+#include "../../../../core/logging/log.h"
 #include "../../../../state/build_data/runtime.h"
 #include "internal.h"
 
@@ -103,7 +106,125 @@ void append_item_perks(const Equipped& equipped,
            && slot < kFirstWeaponSlot + static_cast<std::int8_t>(kWeaponSlotCount);
 }
 
+/** @param bank Hash bank. @return Entries not at the no-hash sentinel. */
+[[nodiscard]] std::size_t
+count_hashes_filled(const std::array<std::uint32_t, layout::kOverflowHashCapacity>& bank) noexcept {
+    std::size_t count = 0;
+    for (const std::uint32_t hash : bank) {
+        if (hash != layout::kNoHash) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+/** @param bank Definition-index bank. @return Entries not at the empty-index sentinel. */
+template <std::size_t N>
+[[nodiscard]] std::size_t
+count_indices_filled(const std::array<std::uint16_t, N>& bank) noexcept {
+    std::size_t count = 0;
+    for (const std::uint16_t index : bank) {
+        if (index != layout::kEmptyDefinitionIndex) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+/** Diagnostic latch: the appearance block is fixed for one encode, so the first one settles it. */
+std::atomic<bool> g_reportedEncoded{};
+
 } // namespace
+
+/**
+ * Reports the completed appearance block's ability buckets, overflow bank, and perk-bank fills once.
+ * Unlike the declared-side ability probe, this runs after every fill and reports the actual wire
+ * content: bucket kinds and per-bucket hash counts, the overflow bank's filled count, and how many
+ * definition indices each perk bank carries. Together with character_appearance_abilities.cpp's
+ * probe this separates "the catalog is empty" from "the record is empty".
+ * @param appearance Completed appearance block, all fills applied.
+ */
+void report_encoded_probe(std::uint64_t soid, const layout::Appearance& appearance) noexcept {
+    if (g_reportedEncoded.exchange(true, std::memory_order_relaxed)) {
+        return;
+    }
+    {
+        std::array<char, 256> kinds{};
+        int used = std::snprintf(kinds.data(),
+                                 kinds.size(),
+                                 "ev=bank stage=kinds soid=0x%llX",
+                                 static_cast<unsigned long long>(soid));
+        for (std::size_t bucket = 0;
+             bucket < appearance.abilityBuckets.size() && used + 16 < kinds.size();
+             ++bucket) {
+            const int extra = std::snprintf(kinds.data() + used,
+                                            kinds.size() - used,
+                                            " b%zu=%d",
+                                            bucket,
+                                            static_cast<int>(appearance.abilityBuckets[bucket].kind));
+            if (extra > 0) {
+                used += static_cast<std::size_t>(extra);
+            }
+        }
+        if (used > 0) {
+            core::log::write(core::log::Channel::middleware,
+                             core::log::Level::info,
+                             {kinds.data(), static_cast<std::size_t>(used)});
+        }
+    }
+    {
+        std::array<char, 384> fills{};
+        int used = std::snprintf(fills.data(),
+                                 fills.size(),
+                                 "ev=bank stage=bucket_fills overflow=%zu",
+                                 count_hashes_filled(appearance.overflowHashes));
+        for (std::size_t bucket = 0;
+             bucket < appearance.abilityBuckets.size() && used + 16 < fills.size();
+             ++bucket) {
+            std::size_t count = 0;
+            for (const std::uint32_t hash : appearance.abilityBuckets[bucket].hashes) {
+                if (hash != layout::kNoHash) {
+                    ++count;
+                }
+            }
+            const int extra = std::snprintf(
+                fills.data() + used, fills.size() - used, " b%zu=%zu", bucket, count);
+            if (extra > 0) {
+                used += static_cast<std::size_t>(extra);
+            }
+        }
+        if (used > 0) {
+            core::log::write(core::log::Channel::middleware,
+                             core::log::Level::info,
+                             {fills.data(), static_cast<std::size_t>(used)});
+        }
+    }
+    {
+        std::array<char, 384> banks{};
+        const std::size_t character = count_indices_filled(appearance.indexBank);
+        const std::size_t weaponA = count_indices_filled(appearance.smallBankA);
+        const std::size_t weaponB = count_indices_filled(appearance.smallBankB);
+        const std::size_t weaponC = count_indices_filled(appearance.smallBankC);
+        const int n = std::snprintf(banks.data(),
+                                    banks.size(),
+                                    "ev=bank stage=index character=%zu weapon_a=%zu weapon_b=%zu "
+                                    "weapon_c=%zu i0=%u i1=%u ia0=%u ib0=%u ic0=%u",
+                                    character,
+                                    weaponA,
+                                    weaponB,
+                                    weaponC,
+                                    static_cast<unsigned>(appearance.indexBank[0]),
+                                    static_cast<unsigned>(appearance.indexBank[1]),
+                                    static_cast<unsigned>(appearance.smallBankA[0]),
+                                    static_cast<unsigned>(appearance.smallBankB[0]),
+                                    static_cast<unsigned>(appearance.smallBankC[0]));
+        if (n > 0) {
+            core::log::write(core::log::Channel::middleware,
+                             core::log::Level::info,
+                             {banks.data(), static_cast<std::size_t>(n)});
+        }
+    }
+}
 
 /** Fills the overflow hash bank from every equipped socket plug, in socket-type priority order. */
 void apply_overflow_hashes(const family4::loadout::ResolvedInstances& instances,

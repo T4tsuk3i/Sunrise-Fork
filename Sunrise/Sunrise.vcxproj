@@ -273,6 +273,8 @@
     <ClCompile Include="src\client\hooks\queuez\svc123_null_payload_guard.cpp" />
     <ClCompile Include="src\client\hooks\queuez\queuez_hook_lifecycle.cpp" />
     <ClCompile Include="src\client\content\diagnostics\content_readiness_report.cpp" />
+    <ClCompile Include="src\client\content\diagnostics\investment_dump.cpp" />
+    <ClCompile Include="src\client\diagnostics\stat_block_scan.cpp" />
     <ClCompile Include="src\client\hooks\network\bubble_authority\bubble_authority_replacements.cpp" />
     <ClCompile Include="src\client\hooks\network\bubble_authority\scope\bubble_authority_scope.cpp" />
     <ClCompile Include="src\client\hooks\network\http\http_descriptor_route.cpp" />
@@ -431,6 +433,8 @@
     <ClCompile Include="src\state\build_data\build_data_runtime.cpp" />
     <ClCompile Include="src\state\build_data\runtime\persistence\build_data_persistence.cpp" />
     <ClCompile Include="src\state\build_data\runtime\persistence\publication_transaction.cpp" />
+    <ClCompile Include="src\state\build_data\armor\armor_definition.cpp" />
+    <ClCompile Include="src\state\build_data\armor\stats\definition.cpp" />
     <ClCompile Include="src\state\build_data\cache\read\cache_file_reader.cpp" />
     <ClCompile Include="src\state\build_data\cache\read\cache_payload_reader.cpp" />
     <ClCompile Include="src\state\build_data\cache\records\cache_domain_validation.cpp" />
@@ -1072,6 +1076,8 @@
     <ClInclude Include="src\state\content_manifest\scanner\package\content_manifest_package_name.h" />
     <ClInclude Include="src\state\content_manifest\content_manifest_row_validation.h" />
     <ClInclude Include="src\state\build_data\definition.h" />
+    <ClInclude Include="src\state\build_data\armor\armor_definition.h" />
+    <ClInclude Include="src\state\build_data\armor\stats\definition.h" />
     <ClInclude Include="src\state\build_data\runtime.h" />
     <ClInclude Include="src\state\build_data\table.h" />
     <ClInclude Include="src\state\build_data\scenarios\scenario_catalog.h" />
@@ -1254,6 +1260,8 @@
     <ClInclude Include="src\client\content\bootstrap\bootstrap_token_publish.h" />
     <ClInclude Include="src\steam\runtime\context\steam_context_state.h" />
     <ClInclude Include="src\client\content\diagnostics\content_readiness_report.h" />
+    <ClInclude Include="src\client\content\diagnostics\investment_dump.h" />
+    <ClInclude Include="src\client\diagnostics\stat_block_scan.h" />
     <ClInclude Include="src\client\content\investment\runtime.h" />
     <ClInclude Include="src\client\content\items\packages\build.h" />
     <ClInclude Include="src\client\content\items\packages\internal.h" />

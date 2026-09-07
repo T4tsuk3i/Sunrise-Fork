@@ -6,6 +6,7 @@
 #include <span>
 #include <string_view>
 
+#include "../diagnostics/stat_block_scan.h"
 #include "../../core/logging/log.h"
 #include "../../core/ui/busy/busy.h"
 #include "../../core/ui/notice/ui_notice_overlay.h"
@@ -178,6 +179,7 @@ void clear_game_targets() noexcept {
     (void)hooks::noclip::install();
     // Attaches whether or not the feature is on, so the interface can enable it without a restart.
     (void)hooks::infinite_ammo::install();
+    (void)diagnostics::start_stat_block_scan();
     // Resolves the activity config getter here; the hold itself runs on the frame tick.
     (void)hooks::inactivity::install();
     (void)hooks::queuez::install();

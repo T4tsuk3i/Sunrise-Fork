@@ -5,6 +5,10 @@
 #include <cstdint>
 #include <optional>
 
+#include <array>
+#include <cstdio>
+
+#include "../../../../core/logging/log.h"
 #include "../../../../state/build_data/runtime.h"
 #include "subclass_socket_selection.h"
 
@@ -182,6 +186,36 @@ bool resolve_item(const authored_inventory::Item& authored,
         static_cast<std::uint32_t>(socketEntryListCount);
     candidate.item.instance.baseDefinitionIndex = itemDefinition.definitionIndex;
     candidate.item.instance.level = authored.level;
+    candidate.item.instance.armor.archetype = authored.armorArchetype;
+    candidate.item.instance.armor.gearTier = authored.armorGearTier;
+    candidate.item.instance.armor.masterworkLevel = authored.armorMasterworkLevel;
+    // Any authored armor meta is reported at the source, so a value that never reaches the stats
+    // phase can be placed either side of this copy rather than guessed at.
+    if (authored.armorArchetype != 0 || authored.armorGearTier != 0
+        || authored.armorMasterworkLevel != 0
+        || authored.armorSetHash != authored_inventory::kNoDefinitionHash) {
+        std::array<char, 192> line{};
+        const int written = std::snprintf(line.data(),
+                                          line.size(),
+                                          "ev=armor_meta stage=authored hash=0x%08X a=%u t=%u "
+                                          "m=%u s=%x",
+                                          authored.definitionHash,
+                                          static_cast<unsigned>(authored.armorArchetype),
+                                          static_cast<unsigned>(authored.armorGearTier),
+                                          static_cast<unsigned>(authored.armorMasterworkLevel),
+                                          authored.armorSetHash);
+        if (written > 0) {
+            core::log::write(core::log::Channel::middleware,
+                             core::log::Level::info,
+                             {line.data(), static_cast<std::size_t>(written)});
+        }
+    }
+    // State spells "no set" as the FNV basis its authored rows default to, while ArmorMeta spells
+    // it as zero like its other three counters. Translating here keeps one meaning of "none" for
+    // everything downstream, so a later consumer can test the whole struct against zero.
+    candidate.item.instance.armor.setHash =
+        authored.armorSetHash == authored_inventory::kNoDefinitionHash ? 0U
+                                                                      : authored.armorSetHash;
     candidate.item.instance.curveSelector = instance::layout::kInitialLevelCurveX;
     candidate.item.instance.capSelector = instance::layout::kInitialLevelCapRow;
     candidate.item.instance.socketEntryListIndex = socketList.definitionIndex;

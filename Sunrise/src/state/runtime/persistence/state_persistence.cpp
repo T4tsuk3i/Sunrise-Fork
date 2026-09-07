@@ -205,6 +205,27 @@ void emit_item(Document& doc, const account::inventory::Item& item, int depth) n
     emit_uint(doc, item.flags);
     comma(doc);
     newline(doc);
+    // Armor meta is written only by an item that carries some, so a save of ordinary gear keeps
+    // the shape it has always had and an absent key still reads back as the documented default.
+    if (item.armorArchetype != 0 || item.armorGearTier != 0 || item.armorMasterworkLevel != 0
+        || item.armorSetHash != account::inventory::kNoDefinitionHash) {
+        emit_key(doc, "armor_archetype", depth + 1);
+        emit_uint(doc, item.armorArchetype);
+        comma(doc);
+        newline(doc);
+        emit_key(doc, "armor_gear_tier", depth + 1);
+        emit_uint(doc, item.armorGearTier);
+        comma(doc);
+        newline(doc);
+        emit_key(doc, "armor_masterwork_level", depth + 1);
+        emit_uint(doc, item.armorMasterworkLevel);
+        comma(doc);
+        newline(doc);
+        emit_key(doc, "armor_set_hash", depth + 1);
+        emit_uint(doc, item.armorSetHash);
+        comma(doc);
+        newline(doc);
+    }
     emit_key(doc, "plugs", depth + 1);
     emit_sockets(doc, item.sockets, depth + 1);
     newline(doc);
@@ -805,6 +826,22 @@ private:
                 std::uint64_t v = 0;
                 if (!parse_uint(v)) return false;
                 item.flags = static_cast<std::uint32_t>(v);
+            } else if (key == "armor_archetype") {
+                std::uint64_t v = 0;
+                if (!parse_uint(v) || v > account::inventory::kArmorArchetypeNone) return false;
+                item.armorArchetype = static_cast<std::uint8_t>(v);
+            } else if (key == "armor_gear_tier") {
+                std::uint64_t v = 0;
+                if (!parse_uint(v) || v > account::inventory::kArmorGearTierNone) return false;
+                item.armorGearTier = static_cast<std::uint8_t>(v);
+            } else if (key == "armor_masterwork_level") {
+                std::uint64_t v = 0;
+                if (!parse_uint(v) || v > account::inventory::kArmorMasterworkNone) return false;
+                item.armorMasterworkLevel = static_cast<std::uint8_t>(v);
+            } else if (key == "armor_set_hash") {
+                std::uint64_t v = 0;
+                if (!parse_uint(v) || v > 0xFFFFFFFFULL) return false;
+                item.armorSetHash = static_cast<std::uint32_t>(v);
             } else if (key == "plugs") {
                 if (!parse_sockets(item.sockets)) return false;
             } else {

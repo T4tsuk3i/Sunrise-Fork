@@ -17,6 +17,10 @@ enum class ItemField : std::size_t {
     quantity,
     plugs,
     flags,
+    armorArchetype,
+    armorGearTier,
+    armorMasterworkLevel,
+    armorSetHash,
     count,
 };
 
@@ -157,15 +161,50 @@ bool Parser::equipment_item(authored_inventory::Item& output) noexcept {
                 return false;
             }
             parsed.flags = static_cast<std::uint32_t>(flags);
+        } else if (key == "armor_archetype") {
+            std::uint64_t archetype = 0;
+            if (!mark(ItemField::armorArchetype)
+                || !unsigned_value(archetype)
+                || archetype > authored_inventory::kArmorArchetypeNone) {
+                return false;
+            }
+            parsed.armorArchetype = static_cast<std::uint8_t>(archetype);
+        } else if (key == "armor_gear_tier") {
+            std::uint64_t tier = 0;
+            if (!mark(ItemField::armorGearTier)
+                || !unsigned_value(tier)
+                || tier > authored_inventory::kArmorGearTierNone) {
+                return false;
+            }
+            parsed.armorGearTier = static_cast<std::uint8_t>(tier);
+        } else if (key == "armor_masterwork_level") {
+            std::uint64_t level = 0;
+            if (!mark(ItemField::armorMasterworkLevel)
+                || !unsigned_value(level)
+                || level > authored_inventory::kArmorMasterworkNone) {
+                return false;
+            }
+            parsed.armorMasterworkLevel = static_cast<std::uint8_t>(level);
+        } else if (key == "armor_set_hash") {
+            std::uint64_t setHash = 0;
+            if (!mark(ItemField::armorSetHash) || !unsigned_value(setHash)
+                || setHash > (std::numeric_limits<std::uint32_t>::max)()) {
+                return false;
+            }
+            parsed.armorSetHash = static_cast<std::uint32_t>(setHash);
         } else {
             return false;
         }
 
         if (consume('}')) {
-            // Authored flags are optional so existing settings remain valid; an omitted value is
-            // the canonical zero state. Every identity, quantity, level and socket field remains
-            // mandatory.
+            // Authored flags and armor meta are optional so existing settings remain valid; an
+            // omitted value is the canonical zero state. Every identity, quantity, level and
+            // socket field remains mandatory.
             supplied.set(static_cast<std::size_t>(ItemField::flags));
+            supplied.set(static_cast<std::size_t>(ItemField::armorArchetype));
+            supplied.set(static_cast<std::size_t>(ItemField::armorGearTier));
+            supplied.set(static_cast<std::size_t>(ItemField::armorMasterworkLevel));
+            supplied.set(static_cast<std::size_t>(ItemField::armorSetHash));
             if (!supplied.all() || !authored_inventory::valid(parsed)) {
                 return false;
             }

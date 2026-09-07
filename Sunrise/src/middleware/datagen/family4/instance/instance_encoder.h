@@ -51,12 +51,30 @@ struct DefinitionBounds {
     std::uint32_t socketEntryListCount{};
 };
 
+/**
+ * Authored Armor 3.0 meta carried through resolution so build data can drive stat phases.
+ * A verbatim copy of the authored item's counters, kept raw so this layer never depends on build
+ * data; zero means the item carries no archetype, no gear tier, no masterwork and no set.
+ */
+struct ArmorMeta {
+    /** Authored archetype 1-6, zero for an item with none. */
+    std::uint8_t archetype{};
+    /** Authored gear tier 1-5, zero for an item with none. */
+    std::uint8_t gearTier{};
+    /** Authored masterwork level 1-5, zero for an unmasterworked item. */
+    std::uint8_t masterworkLevel{};
+    /** Authored set hash, zero for an item that belongs to no set. */
+    std::uint32_t setHash{};
+};
+
 /** Fully resolved semantic and native data required by one item-instance record. */
 struct ResolvedInstance {
     std::uint64_t instanceSoid{};
     DefinitionBounds bounds{};
     std::uint16_t baseDefinitionIndex{layout::kEmptyDefinitionIndex};
     std::int32_t level{};
+    /** Authored Armor 3.0 meta resolved from the authored item. */
+    ArmorMeta armor{};
     /** Runtime-scored level curve written into the same native instance prefix. */
     std::uint16_t curveSelector{layout::kInitialLevelCurveX};
     /** Runtime-scored level cap written into the same native instance prefix. */
