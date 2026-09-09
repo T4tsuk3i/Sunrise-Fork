@@ -24,10 +24,15 @@ bool Parser::client_settings(client::Settings& output) noexcept {
     bool hasCharacterStatFillFirst = false;
     bool hasCharacterStatFillLast = false;
     bool hasStatScanDelay = false;
+    bool hasStatScanInterval = false;
     bool hasStatScanWindow = false;
     bool hasStatScanValues = false;
     bool hasCharacterStatRowBonuses = false;
     bool hasInvestmentDump = false;
+    bool hasAbilityAudit = false;
+    bool hasDebugFlagScanDelay = false;
+    bool hasStatWatchDelay = false;
+    bool hasStatWatchInterval = false;
     if (consume('}')) {
         return true;
     }
@@ -128,6 +133,14 @@ bool Parser::client_settings(client::Settings& output) noexcept {
             }
             candidate.statScanDelayMs = value;
             hasStatScanDelay = true;
+        } else if (key == "stat_scan_interval_ms") {
+            std::uint64_t value = 0;
+            if (hasStatScanInterval || !unsigned_integer(value)
+                || value > client::kMaximumStatScanInterval) {
+                return false;
+            }
+            candidate.statScanIntervalMs = value;
+            hasStatScanInterval = true;
         } else if (key == "stat_scan_window_bytes") {
             std::uint64_t value = 0;
             if (hasStatScanWindow || !unsigned_integer(value) || value == 0
@@ -196,6 +209,32 @@ bool Parser::client_settings(client::Settings& output) noexcept {
                 return false;
             }
             hasInvestmentDump = true;
+        } else if (key == "ability_audit") {
+            if (hasAbilityAudit || !boolean(candidate.abilityAudit)) {
+                return false;
+            }
+            hasAbilityAudit = true;
+        } else if (key == "debug_flag_scan_delay_ms") {
+            std::uint64_t value = 0;
+            if (hasDebugFlagScanDelay || !unsigned_integer(value)) {
+                return false;
+            }
+            candidate.debugFlagScanDelayMs = value;
+            hasDebugFlagScanDelay = true;
+        } else if (key == "stat_watch_delay_ms") {
+            std::uint64_t value = 0;
+            if (hasStatWatchDelay || !unsigned_integer(value)) {
+                return false;
+            }
+            candidate.statWatchDelayMs = value;
+            hasStatWatchDelay = true;
+        } else if (key == "stat_watch_interval_ms") {
+            std::uint64_t value = 0;
+            if (hasStatWatchInterval || !unsigned_integer(value)) {
+                return false;
+            }
+            candidate.statWatchIntervalMs = value;
+            hasStatWatchInterval = true;
         } else if (!skip_value(0)) {
             return false;
         }

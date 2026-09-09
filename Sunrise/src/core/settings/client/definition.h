@@ -27,6 +27,8 @@ inline constexpr std::uint64_t kMaximumCharacterStatBonus = 1'000;
 inline constexpr std::size_t kStatScanValueCapacity = 8;
 /** Widest window a scan searches for the remaining values, in bytes. */
 inline constexpr std::uint64_t kMaximumStatScanWindow = 4096;
+/** Longest gap permitted between repeating scan passes, in milliseconds. */
+inline constexpr std::uint64_t kMaximumStatScanInterval = 60000;
 
 /** Read-only Client settings parsed by Core. */
 struct Settings {
@@ -97,6 +99,12 @@ struct Settings {
     std::uint64_t statScanDelayMs{};
     /** Bytes searched for the remaining values once the first one matches. */
     std::uint64_t statScanWindowBytes{64};
+    /**
+     * Gap between scan passes after the first, or zero to stop at a one-shot scan.
+     * A repeating scan lets a hit land while an ability is actually being used, instead of
+     * demanding the delay be timed against a button press.
+     */
+    std::uint64_t statScanIntervalMs{};
     /** Values the scan looks for, in order. */
     std::array<std::int32_t, kStatScanValueCapacity> statScanValues{};
     /** Filled leading entries in `statScanValues`. */
@@ -115,6 +123,31 @@ struct Settings {
      * it off outside a session that actually wants the dump. Off by default.
      */
     bool investmentDump{false};
+    /**
+     * Dumps the published ability game-data tables once: the subclass socket entry census, the
+     * twelve published ability buckets with their definition hashes, and the equipped exotic
+     * helmet's configured detail (tier, stat rows, socket list and sandbox perks). Off by default.
+     */
+    bool abilityAudit{false};
+    /**
+     * Delay before the one-shot debug-flag string scan runs, or zero to leave it off.
+     * Searches live process memory for known internal build cvar/flag name literals (the kind an
+     * unreleased build carries in its own read-only data), so a name found this way still has to
+     * be confirmed by hand; this only narrows where to look.
+     */
+    std::uint64_t debugFlagScanDelayMs{};
+    /**
+     * Delay before the character stat block is located and polling starts, or zero to leave it
+     * off. Reuses `stat_scan_values`/`stat_scan_window_bytes` to find the block the same way
+     * `stat_scan_delay_ms` does, but instead of a one-shot dump this keeps a background thread
+     * reading it for the rest of the session and logs whenever any of its six floats changes.
+     * A hardware breakpoint would name the reading instruction too, but VMProtect likely checks
+     * the debug registers as its own anti-tamper measure, so a plain periodic read is the safer
+     * way to answer the same question: whether anything touches a given stat's slot during play.
+     */
+    std::uint64_t statWatchDelayMs{};
+    /** Milliseconds between polls once watching starts. Zero selects the built-in default. */
+    std::uint64_t statWatchIntervalMs{};
 };
 
 } // namespace sunrise::core::settings::client

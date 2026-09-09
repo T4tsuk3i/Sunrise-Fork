@@ -47,10 +47,14 @@
     "character_stat_fill_first": 0,
     "character_stat_fill_last": 31,
     "stat_scan_delay_ms": 0,
+    "stat_scan_interval_ms": 0,
     "stat_scan_window_bytes": 64,
     "stat_scan_values": [],
     "character_stat_bonus_rows": [0, 0, 0, 0, 0, 0],
-    "investment_dump": false
+    "investment_dump": false,
+    "debug_flag_scan_delay_ms": 0,
+    "stat_watch_delay_ms": 0,
+    "stat_watch_interval_ms": 0
   },
   "server": {
     "bap_port": 30974,

@@ -291,7 +291,10 @@
     <ClCompile Include="src\client\hooks\queuez\queuez_hook_lifecycle.cpp" />
     <ClCompile Include="src\client\content\diagnostics\content_readiness_report.cpp" />
     <ClCompile Include="src\client\content\diagnostics\investment_dump.cpp" />
+    <ClCompile Include="src\client\diagnostics\ability_audit.cpp" />
     <ClCompile Include="src\client\diagnostics\stat_block_scan.cpp" />
+    <ClCompile Include="src\client\diagnostics\debug_flag_scan.cpp" />
+    <ClCompile Include="src\client\diagnostics\stat_block_watch.cpp" />
     <ClCompile Include="src\client\hooks\network\bubble_authority\bubble_authority_replacements.cpp" />
     <ClCompile Include="src\client\hooks\network\bubble_authority\scope\bubble_authority_scope.cpp" />
     <ClCompile Include="src\client\hooks\network\http\http_descriptor_route.cpp" />
@@ -1817,6 +1820,8 @@
     <ClInclude Include="src\client\content\diagnostics\content_readiness_report.h" />
     <ClInclude Include="src\client\content\diagnostics\investment_dump.h" />
     <ClInclude Include="src\client\diagnostics\stat_block_scan.h" />
+    <ClInclude Include="src\client\diagnostics\debug_flag_scan.h" />
+    <ClInclude Include="src\client\diagnostics\stat_block_watch.h" />
     <ClInclude Include="src\client\content\investment\runtime.h" />
     <ClInclude Include="src\client\content\items\packages\build.h" />
     <ClInclude Include="src\client\content\items\packages\internal.h" />

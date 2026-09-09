@@ -14,7 +14,10 @@
 #include "../content/bootstrap/bootstrap_token_publish.h"
 #include "../content/investment/worker.h"
 #include "../executable/image.h"
+#include "../diagnostics/ability_audit.h"
+#include "../diagnostics/debug_flag_scan.h"
 #include "../diagnostics/stat_block_scan.h"
+#include "../diagnostics/stat_block_watch.h"
 #include "../hooks/assert_handler/assert_handler_lifecycle.h"
 #include "../hooks/async_io/async_io_lifetime_guard.h"
 #include "../hooks/bitmap/bitmap_hook_lifecycle.h"
@@ -224,6 +227,13 @@ void clear_game_targets() noexcept {
     // One-shot hunt for the sandbox's character stat block, scheduled on its own thread after a
     // configured delay. Disabled unless settings request it.
     (void)diagnostics::start_stat_block_scan();
+    // One-shot hunt for internal build cvar/flag name literals, same schedule and gate.
+    (void)diagnostics::start_debug_flag_scan();
+    // One-shot dump of the published ability game-data tables, once the content slice is ready.
+    (void)diagnostics::start_ability_audit();
+    // Locates the stat block once, then polls it for the rest of the session. Disabled unless
+    // settings request it.
+    (void)diagnostics::start_stat_block_watch();
     content::investment::worker::activate();
     content::activity::scriptables::activate();
     return true;
